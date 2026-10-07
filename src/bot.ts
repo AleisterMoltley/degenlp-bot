@@ -1,11 +1,14 @@
 import { buildCandidates, fetchOriginalOpportunityChecks, fetchTopPumpTokens } from "./apis.js";
 import { config } from "./config.js";
+import { deploySolFor, equitySol, paceSol } from "./growth.js";
 import { DlmmExecutor, enterPositionDryRun } from "./executor.js";
+import { fetchMeteoraCandidates } from "./meteora.js";
+import { accrueFees, entryCostUsd, markIlUsd } from "./pnl.js";
+import { hydratePosition } from "./position.js";
 import { measureRpcLatency, ProofNetworkTelemetry } from "./proofnetwork.js";
-import { pickBestCandidate, decide } from "./scorer.js";
-import { loadState, saveState, type BotState } from "./state.js";
-import { computeMetrics } from "./scorer.js";
-import type { ActivePosition, OpportunityCheck, PoolCandidate } from "./types.js";
+import { decide, planPosition, planToCheck, rankPools, type Plan, type RankedPool } from "./scorer.js";
+import { ensureGrowth, loadState, saveState, type BotState, type GrowthLedger } from "./state.js";
+import type { ActivePosition, BotDecision, OpportunityCheck, PoolCandidate } from "./types.js";
 
 export interface ScanRecord {
   at: string;
@@ -13,7 +16,11 @@ export interface ScanRecord {
   topCandidates: Array<{
     poolName: string;
     tokenSymbol: string;
+    venue: string;
+    side: string;
     opportunityScore: number;
+    edgeUsd: number;
+    fee30m: number;
     metThreshold: boolean;
   }>;
 }
@@ -29,6 +36,18 @@ export interface BotSnapshot {
   scanHistory: ScanRecord[];
   activePosition: ActivePosition | null;
   closedCount: number;
+  book: BotState["book"];
+  growth: {
+    startSol: number;
+    targetSol: number;
+    equitySol: number;
+    realizedSol: number;
+    paceSol: number;
+    deploySol: number;
+    startedAt: number;
+  };
+  scanMs: number;
+  poolCounts: { dlmm: number; damm_v2: number; damm_v1: number };
   config: {
     dryRun: boolean;
     mirrorOriginal: boolean;
@@ -54,9 +73,15 @@ export class DegenLpBot {
   private lastScan: OpportunityCheck | null = null;
   private scanHistory: ScanRecord[] = [];
   private lastTopCandidates: ScanRecord["topCandidates"] = [];
+  private lastScanMs = 0;
+  private poolCounts = { dlmm: 0, damm_v2: 0, damm_v1: 0 };
+  private cooloff = new Map<string, number>();
+  private deploySol = config.solDeploy;
 
   constructor() {
     this.state = loadState();
+    ensureGrowth(this.state);
+    if (this.state.active) this.state.active = hydratePosition(this.state.active);
     if (!config.dryRun) {
       this.executor = DlmmExecutor.fromEnv();
     }
@@ -73,35 +98,105 @@ export class DegenLpBot {
   }
 
   private async independentScan(): Promise<OpportunityCheck> {
-    const tokens = await fetchTopPumpTokens(config.topTokensLimit);
-    const candidates = await buildCandidates(tokens);
-    this.lastTopCandidates = this.rankCandidates(candidates);
-    const best = pickBestCandidate(candidates);
-    const check = decide(best, this.state.active);
+    const started = Date.now();
+    const candidates = await fetchMeteoraCandidates();
+    const now = Date.now();
+    const holding = this.state.active?.poolAddress;
+    const tradable = (config.dryRun ? candidates : candidates.filter((pool) => pool.venue === "dlmm")).filter(
+      (pool) => pool.poolAddress === holding || (this.cooloff.get(pool.poolAddress) ?? 0) <= now,
+    );
+    const equity = this.refreshDeploy();
+    const ranked = rankPools(tradable, { deploySol: this.deploySol, growth: true });
+    this.lastScanMs = Date.now() - started;
+    this.poolCounts = {
+      dlmm: candidates.filter((pool) => pool.venue === "dlmm").length,
+      damm_v2: candidates.filter((pool) => pool.venue === "damm_v2").length,
+      damm_v1: candidates.filter((pool) => pool.venue === "damm_v1").length,
+    };
+    this.lastTopCandidates = ranked.slice(0, 8).map((row) => ({
+      poolName: row.pool.poolName,
+      tokenSymbol: row.pool.tokenSymbol,
+      venue: row.pool.venue,
+      side: row.pool.side,
+      opportunityScore: row.metrics.opportunityScore,
+      edgeUsd: row.metrics.edgeUsd,
+      fee30m: row.pool.fee30mUsd,
+      metThreshold: row.metrics.metThreshold,
+    }));
+    if (this.state.active) this.state.active = hydratePosition(this.state.active);
+    if (this.state.active) {
+      const seen = ranked.some((row) => row.pool.poolAddress === this.state.active?.poolAddress);
+      this.state.active.scanMisses = seen ? 0 : (this.state.active.scanMisses ?? 0) + 1;
+    }
+    this.markActive(ranked);
+    saveState(this.state);
+    const plan = planPosition({
+      ranked,
+      active: this.state.active,
+      now: Date.now(),
+      deploySol: this.deploySol,
+      lossCut: config.growthLossCut,
+    });
+    const check = planToCheck(plan, this.state.active, Date.now());
 
     console.log(
-      `[scan] decision=${check.decision} pool=${check.poolName} score=${check.opportunityScore.toFixed(3)} met=${check.metThreshold}`,
+      `[scan] ${check.decision} ${check.venue ?? "none"} ${plan.pool?.side ?? ""} ${check.poolName} edge=$${((plan.metrics?.edgeUsd) ?? 0).toFixed(3)} deploy=${this.deploySol.toFixed(3)} equity=${equity.toFixed(3)} ${plan.reason} ${this.lastScanMs}ms pools=${candidates.length} dlmm=${this.poolCounts.dlmm} damm2=${this.poolCounts.damm_v2} damm1=${this.poolCounts.damm_v1}`,
     );
 
-    await this.applyDecision(check, best);
+    await this.applyPlan(plan, check);
     await this.pushTelemetry(check);
     this.recordScan(check);
+    this.logBook();
     return check;
   }
 
-  private rankCandidates(candidates: PoolCandidate[]): ScanRecord["topCandidates"] {
-    return candidates
-      .map((c) => {
-        const m = computeMetrics(c);
-        return {
-          poolName: c.poolName,
-          tokenSymbol: c.tokenSymbol,
-          opportunityScore: m.opportunityScore,
-          metThreshold: m.metThreshold,
-        };
-      })
-      .sort((a, b) => b.opportunityScore - a.opportunityScore)
-      .slice(0, 10);
+  private markActive(ranked: RankedPool[]) {
+    if (!config.dryRun || !this.state.active) return;
+    const pos = this.state.active;
+    const row = ranked.find((item) => item.pool.poolAddress === pos.poolAddress);
+    const now = Date.now();
+    const elapsedMin = Math.min(
+      (config.scanIntervalMs / 60_000) * 1.5,
+      Math.max(0, (now - pos.lastMarkAt) / 60_000),
+    );
+    const pool = row?.pool;
+    const price = pool?.priceUsd || pos.lastPrice || pos.entryPrice;
+    const sol = pool?.solPrice || pos.solPrice || 0;
+    const deployUsd = pos.solDeployed * sol;
+    const inside = price >= pos.priceLower && price <= pos.priceUpper;
+    if (pool && deployUsd > 0) {
+      pos.feesAccruedUsd += accrueFees({
+        fees30mUsd: pool.fee30mUsd,
+        tvlUsd: pool.pairLiquidityUsd,
+        deployUsd,
+        elapsedMin,
+        inRange: pos.side === "full" || inside,
+        side: pos.side,
+        rangeHalfWidth: pos.rangeHalfWidth,
+      });
+      pos.ilUsd = markIlUsd({
+        deployUsd,
+        entryPrice: pos.entryPrice,
+        price,
+        lower: pos.priceLower,
+        upper: pos.priceUpper,
+        side: pos.side,
+      });
+      pos.solPrice = sol;
+    } else if (!pool && deployUsd > 0) {
+      pos.ilUsd = Math.max(pos.ilUsd, deployUsd * 0.5);
+    }
+    pos.lastPrice = price;
+    pos.lastMarkAt = now;
+  }
+
+  private logBook() {
+    const book = this.state.book;
+    const open = this.state.active;
+    const openNet = open ? open.feesAccruedUsd - open.ilUsd - open.costsUsd : 0;
+    console.log(
+      `[book] realized=$${book.realizedUsd.toFixed(4)} fees=$${book.feesUsd.toFixed(4)} il=$${book.ilUsd.toFixed(4)} costs=$${book.costsUsd.toFixed(4)} open=$${openNet.toFixed(4)} entries=${book.entries} exits=${book.exits} adjusts=${book.adjusts} rotates=${book.rotates}`,
+    );
   }
 
   private recordScan(check: OpportunityCheck) {
@@ -167,59 +262,102 @@ export class DegenLpBot {
     }
   }
 
-  private async applyDecision(
-    check: OpportunityCheck,
-    candidate: Awaited<ReturnType<typeof pickBestCandidate>>,
-  ) {
+  private async applyDecision(check: OpportunityCheck, candidate: PoolCandidate | null) {
+    const plan: Plan = {
+      action: check.decision,
+      pool: candidate,
+      metrics: null,
+      reason: check.reason ?? check.decision,
+    };
+    await this.applyPlan(plan, check);
+  }
+
+  private async applyPlan(plan: Plan, check: OpportunityCheck) {
     if (!this.executor && !config.dryRun) {
       this.executor = DlmmExecutor.fromEnv();
     }
 
-    const exec = this.executor;
+    const closes = plan.action === "exit" || plan.action === "adjust" || plan.action === "rotate";
+    const opens = plan.action === "enter" || plan.action === "adjust" || plan.action === "rotate";
 
-    if (check.decision === "exit" && this.state.active) {
-      const active = this.state.active;
-      if (exec) {
-        const exists = await exec.positionExists(active.positionAddress);
-        const reason = exists
-          ? "rotation / threshold miss"
-          : "Position not found on-chain - already closed";
-        const sig = await exec.exit(active, reason);
-        active.status = "closed";
-        active.entrySignature = sig;
-        this.state.closed.push(active);
-        this.state.active = null;
-        saveState(this.state);
-        await this.telemetryExit(active, reason, sig);
-      } else if (config.dryRun) {
-        console.log(`[dry-run exit] ${active.poolName}`);
-        active.status = "closed";
-        this.state.closed.push(active);
-        this.state.active = null;
-        saveState(this.state);
-        await this.telemetryExit(active, "dry-run exit", "dry_run_exit");
-      }
-      return;
+    if (closes && this.state.active) {
+      await this.closeActive(plan.reason, plan.action);
+    }
+    if (opens && plan.pool && !this.state.active) {
+      await this.openActive(plan.pool, check);
+    }
+    if (plan.action === "stay" && this.state.active) {
+      const pos = this.state.active;
+      const net = pos.feesAccruedUsd - pos.ilUsd - pos.costsUsd;
+      console.log(
+        `[stay] ${pos.venue} ${pos.poolName} fees=$${pos.feesAccruedUsd.toFixed(4)} il=$${pos.ilUsd.toFixed(4)} net=$${net.toFixed(4)}`,
+      );
+    }
+  }
+
+  private async closeActive(reason: string, action: BotDecision) {
+    const active = this.state.active;
+    if (!active) return;
+
+    let sig = "dry_run_exit";
+    if (!config.dryRun && this.executor) {
+      const exists = await this.executor.positionExists(active.positionAddress);
+      sig = await this.executor.exit(active, exists ? reason : "Position not found on-chain - already closed");
+    } else {
+      console.log(`[dry-run exit] ${active.venue} ${active.poolName} ${reason}`);
+      active.costsUsd += config.txCostUsd;
     }
 
-    if (check.decision === "enter" && candidate && !this.state.active) {
-      if (exec || config.dryRun) {
-        const pos = config.dryRun
-          ? await enterPositionDryRun(candidate, check)
-          : await exec!.enter(candidate, check);
-        this.state.positionSeq += 1;
-        pos.id = `pos_${this.state.positionSeq}`;
-        this.state.active = pos;
-        saveState(this.state);
-        console.log(`[position] opened ${pos.id} ${pos.poolName}`);
-        await this.telemetryEntry(pos);
-      }
-      return;
+    if (/divergence|edge gone|left the range|left the fee list|risk budget/.test(reason)) {
+      this.cooloff.set(active.poolAddress, Date.now() + 15 * 60_000);
     }
+    const net = active.feesAccruedUsd - active.ilUsd - active.costsUsd;
+    const growth = ensureGrowth(this.state);
+    if (active.solPrice > 0) growth.realizedSol += net / active.solPrice;
+    this.state.book.feesUsd += active.feesAccruedUsd;
+    this.state.book.ilUsd += active.ilUsd;
+    this.state.book.costsUsd += active.costsUsd;
+    this.state.book.realizedUsd += net;
+    this.state.book.exits += 1;
+    if (action === "adjust") this.state.book.adjusts += 1;
+    if (action === "rotate") this.state.book.rotates += 1;
 
-    if (check.decision === "stay" && this.state.active) {
-      console.log(`[stay] ${this.state.active.poolName}`);
+    active.status = "closed";
+    active.exitReason = reason;
+    active.entrySignature = sig;
+    this.state.closed.unshift(active);
+    if (this.state.closed.length > 40) this.state.closed.length = 40;
+    this.state.active = null;
+    saveState(this.state);
+    console.log(`[closed] ${active.poolName} net=$${net.toFixed(4)} book=$${this.state.book.realizedUsd.toFixed(4)}`);
+    await this.telemetryExit(active, reason, sig);
+  }
+
+  private async openActive(pool: PoolCandidate, check: OpportunityCheck) {
+    if (!config.dryRun && pool.venue !== "dlmm") {
+      throw new Error(`live signing is DLMM-only, skipped ${pool.venue} ${pool.poolName}`);
     }
+    const solDeploy = this.deploySol;
+    const pos = config.dryRun
+      ? await enterPositionDryRun(pool, check, solDeploy)
+      : await this.executor!.enter(pool, check, solDeploy);
+    this.state.positionSeq += 1;
+    pos.id = `pos_${this.state.positionSeq}`;
+    pos.solDeployed = solDeploy;
+    if (config.dryRun) {
+      const deployUsd = solDeploy * (pool.solPrice || pos.solPrice || 0);
+      pos.costsUsd += entryCostUsd({
+        side: pool.side,
+        deployUsd,
+        txCostUsd: config.txCostUsd,
+        swapBps: config.swapBps,
+      });
+    }
+    this.state.book.entries += 1;
+    this.state.active = pos;
+    saveState(this.state);
+    console.log(`[position] opened ${pos.id} ${pos.venue} ${pos.side} ${pos.poolName} ${pos.solDeployed.toFixed(3)} SOL`);
+    await this.telemetryEntry(pos);
   }
 
   getSnapshot(): BotSnapshot {
@@ -234,15 +372,53 @@ export class DegenLpBot {
       scanHistory: this.scanHistory,
       activePosition: this.state.active,
       closedCount: this.state.closed.length,
+      book: this.state.book,
+      growth: this.growthView(),
+      scanMs: this.lastScanMs,
+      poolCounts: this.poolCounts,
       config: {
         dryRun: config.dryRun,
         mirrorOriginal: config.mirrorOriginal,
-        solDeploy: config.solDeploy,
+        solDeploy: this.deploySol,
         scanIntervalMs: config.scanIntervalMs,
         proofnetworkTelemetry: config.proofnetworkTelemetry,
         proofnetworkContract: config.proofnetworkContract,
         walletConfigured: Boolean(config.walletPrivateKey),
       },
+    };
+  }
+
+  private refreshDeploy(): number {
+    const growth = ensureGrowth(this.state);
+    const open = this.state.active;
+    const openNet = open ? open.feesAccruedUsd - open.ilUsd - open.costsUsd : 0;
+    const equity = equitySol({
+      startSol: growth.startSol,
+      realizedSol: growth.realizedSol,
+      openNetUsd: openNet,
+      solPrice: open?.solPrice || 0,
+    });
+    this.deploySol = deploySolFor(equity, config.growthRisk);
+    return equity;
+  }
+
+  private growthView(): BotSnapshot["growth"] {
+    const growth: GrowthLedger = ensureGrowth(this.state);
+    const equity = this.refreshDeploy();
+    return {
+      startSol: growth.startSol,
+      targetSol: growth.targetSol,
+      equitySol: equity,
+      realizedSol: growth.realizedSol,
+      paceSol: paceSol({
+        startSol: growth.startSol,
+        targetSol: growth.targetSol,
+        startedAt: growth.startedAt,
+        now: Date.now(),
+        weekMs: config.growthWeekMs,
+      }),
+      deploySol: this.deploySol,
+      startedAt: growth.startedAt,
     };
   }
 
@@ -260,8 +436,14 @@ export class DegenLpBot {
 
   async startLoop() {
     console.log("Degen LP Bot starting");
-    console.log(`mode=${config.dryRun ? "DRY_RUN" : "LIVE"} mirror=${config.mirrorOriginal}`);
-    console.log(`telemetry=${!!this.telemetry} solDeploy=${config.solDeploy}`);
+    console.log(
+      `mode=${config.dryRun ? "DRY_RUN" : "LIVE"} venues=${config.venues.join(",")} mirror=${config.mirrorOriginal}`,
+    );
+    const growth = ensureGrowth(this.state);
+    const equity = this.refreshDeploy();
+    console.log(
+      `telemetry=${!!this.telemetry} bankroll=${growth.startSol} equity=${equity.toFixed(3)} target=${growth.targetSol} deploy=${this.deploySol.toFixed(3)} every=${config.scanIntervalMs}ms`,
+    );
 
     await this.sendStartupAlert();
     this.loopRunning = true;

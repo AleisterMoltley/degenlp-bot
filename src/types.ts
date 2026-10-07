@@ -1,4 +1,9 @@
-export type BotDecision = "wait" | "enter" | "stay" | "exit";
+export type BotDecision = "wait" | "enter" | "stay" | "exit" | "adjust" | "rotate";
+
+export type PoolVenue = "dlmm" | "damm_v2" | "damm_v1";
+
+/** bid = SOL under the price. curve = both tokens tight around the price. full = both tokens, whole curve. range = both tokens inside a fixed pool range. */
+export type LpSide = "bid" | "curve" | "full" | "range";
 
 export interface OpportunityCheck {
   poolAddress: string;
@@ -17,6 +22,9 @@ export interface OpportunityCheck {
   currentPositionPool: string;
   metThreshold: boolean;
   binStep?: number;
+  venue?: PoolVenue;
+  fee30mUsd?: number;
+  reason?: string;
   checkedAt: number;
 }
 
@@ -41,6 +49,30 @@ export interface ActivePosition {
   tokenMint: string;
   status: "active" | "closed";
   enteredAt: number;
+  venue: PoolVenue;
+  side: LpSide;
+  feesAccruedUsd: number;
+  ilUsd: number;
+  costsUsd: number;
+  lastMarkAt: number;
+  lastPrice: number;
+  rangeHalfWidth: number;
+  priceLower: number;
+  priceUpper: number;
+  solPrice: number;
+  scanMisses?: number;
+  exitReason?: string;
+}
+
+export interface Book {
+  realizedUsd: number;
+  feesUsd: number;
+  ilUsd: number;
+  costsUsd: number;
+  entries: number;
+  exits: number;
+  adjusts: number;
+  rotates: number;
 }
 
 export interface PoolCandidate {
@@ -56,4 +88,14 @@ export interface PoolCandidate {
   binStep?: number;
   baseFeePct?: number;
   jupiterScore: number;
+  venue: PoolVenue;
+  side: LpSide;
+  fee30mUsd: number;
+  fee1hUsd: number;
+  volume30mUsd: number;
+  holders: number;
+  createdAtMs: number;
+  freezeDisabled: boolean;
+  solPrice: number;
+  rangeHalfWidth: number;
 }

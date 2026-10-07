@@ -8,6 +8,7 @@ import {
 } from "@solana/web3.js";
 import BN from "bn.js";
 import { config } from "./config.js";
+import { buildPosition } from "./position.js";
 import type { ActivePosition, OpportunityCheck, PoolCandidate } from "./types.js";
 
 export class DlmmExecutor {
@@ -33,15 +34,18 @@ export class DlmmExecutor {
     return info !== null;
   }
 
-  async enter(candidate: PoolCandidate, check: OpportunityCheck): Promise<ActivePosition> {
+  async enter(candidate: PoolCandidate, check: OpportunityCheck, solDeploy = config.solDeploy): Promise<ActivePosition> {
     const positionKp = Keypair.generate();
     const poolPk = new PublicKey(candidate.poolAddress);
     const dlmm = await DLMM.create(this.connection, poolPk);
 
+    if (!config.dryRun && candidate.side === "curve") {
+      throw new Error("live curve deposits need a both-sided swap; paper only");
+    }
     const active = await dlmm.getActiveBin();
-    const maxBinId = active.binId - 1;
-    const minBinId = active.binId - config.binRange;
-    const solLamports = Math.floor(config.solDeploy * 1e9);
+    const maxBinId = active.binId;
+    const minBinId = active.binId - config.scalpBins;
+    const solLamports = Math.floor(solDeploy * 1e9);
 
     const tokenX = dlmm.tokenX.publicKey.toBase58();
     const tokenY = dlmm.tokenY.publicKey.toBase58();
@@ -51,7 +55,7 @@ export class DlmmExecutor {
     const totalYAmount = new BN(isSolY ? solLamports : 0);
 
     console.log(
-      `[enter] ${candidate.poolName} bins ${minBinId}..${maxBinId} deploy ${config.solDeploy} SOL`,
+      `[enter] ${candidate.poolName} bins ${minBinId}..${maxBinId} deploy ${solDeploy} SOL`,
     );
 
     let entrySignature = "dry_run";
@@ -73,28 +77,16 @@ export class DlmmExecutor {
       ]);
     }
 
-    return {
-      id: "",
-      poolAddress: candidate.poolAddress,
-      poolName: candidate.poolName,
-      baseTokenSymbol: candidate.tokenSymbol,
-      quoteTokenSymbol: "SOL",
-      binStep: check.binStep ?? 0,
+    return buildPosition({
+      pool: candidate,
+      solDeployed: solDeploy,
+      feeToTvl: check.feeToTvlRatio,
+      opportunityScore: check.opportunityScore,
       positionAddress: positionKp.publicKey.toBase58(),
       minBinId,
       maxBinId,
-      solDeployed: config.solDeploy,
-      entryPrice: candidate.priceUsd,
-      feeTvlRatioAtEntry: check.feeToTvlRatio,
-      liquidityAtEntry: candidate.pairLiquidityUsd,
-      opportunityScoreAtEntry: check.opportunityScore,
-      marketCapAtEntry: candidate.marketCap,
-      jupiterScoreAtEntry: check.jupiterScore,
       entrySignature,
-      tokenMint: candidate.tokenMint,
-      status: "active",
-      enteredAt: Date.now(),
-    };
+    });
   }
 
   async exit(position: ActivePosition, reason: string): Promise<string> {
@@ -128,27 +120,13 @@ export class DlmmExecutor {
 export async function enterPositionDryRun(
   candidate: PoolCandidate,
   check: OpportunityCheck,
+  solDeploy = config.solDeploy,
 ): Promise<ActivePosition> {
-  return {
-    id: "",
-    poolAddress: candidate.poolAddress,
-    poolName: candidate.poolName,
-    baseTokenSymbol: candidate.tokenSymbol,
-    quoteTokenSymbol: "SOL",
-    binStep: check.binStep ?? 0,
-    positionAddress: Keypair.generate().publicKey.toBase58(),
-    minBinId: 0,
-    maxBinId: 0,
-    solDeployed: config.solDeploy,
-    entryPrice: candidate.priceUsd,
-    feeTvlRatioAtEntry: check.feeToTvlRatio,
-    liquidityAtEntry: candidate.pairLiquidityUsd,
-    opportunityScoreAtEntry: check.opportunityScore,
-    marketCapAtEntry: candidate.marketCap,
-    jupiterScoreAtEntry: check.jupiterScore,
+  return buildPosition({
+    pool: candidate,
+    solDeployed: solDeploy,
+    feeToTvl: check.feeToTvlRatio,
+    opportunityScore: check.opportunityScore,
     entrySignature: "dry_run",
-    tokenMint: candidate.tokenMint,
-    status: "active",
-    enteredAt: Date.now(),
-  };
+  });
 }

@@ -70,7 +70,7 @@ function dashboardHtml(): string {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Degen LP Bot</title>
+  <title>Degen LP</title>
   <style>
     :root {
       --bg: #070b0a;
@@ -137,8 +137,8 @@ function dashboardHtml(): string {
 </head>
 <body>
   <div class="wrap">
-    <h1>Degen LP Bot</h1>
-    <p class="sub">Meteora DLMM scanner · Railway dashboard</p>
+    <h1>Degen LP</h1>
+    <p class="sub">Paper growth desk. It compounds a 1 SOL bankroll into the pool with the best edge after costs. The week target is 30 SOL. A seat is cut when it gives back 12% of its size. The path is not a promise.</p>
 
     <div class="actions">
       <button class="primary" onclick="scanNow()">Scan now</button>
@@ -160,7 +160,7 @@ function dashboardHtml(): string {
     </div>
 
     <div class="section card">
-      <div class="label">Top candidates (last scan)</div>
+      <div class="label">Scalp gate</div>
       <div id="candidates" style="margin-top:10px"></div>
     </div>
 
@@ -176,6 +176,11 @@ function dashboardHtml(): string {
   </div>
 
   <script>
+    function openNet(s) {
+      const p = s.activePosition;
+      if (!p) return 0;
+      return (p.feesAccruedUsd||0) - (p.ilUsd||0) - (p.costsUsd||0);
+    }
     function badge(text, cls) { return '<span class="badge ' + cls + '">' + text + '</span>'; }
     function fmt(n, d=3) { return Number(n||0).toFixed(d); }
     function esc(s) { return String(s??'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -197,34 +202,44 @@ function dashboardHtml(): string {
         ['Wallet', wallet],
         ['Uptime', Math.floor(s.uptimeSec/60) + 'm'],
         ['Scans', String(s.scanCount)],
-        ['SOL / entry', s.config.solDeploy + ' SOL'],
+        ['Scan', (s.scanMs || 0) + ' ms'],
         ['Interval', (s.config.scanIntervalMs/1000) + 's'],
-        ['Closed', String(s.closedCount)],
+        ['Pools', (s.poolCounts ? (s.poolCounts.dlmm + '/' + s.poolCounts.damm_v2 + '/' + s.poolCounts.damm_v1) : '—')],
+        ['Equity', s.growth ? fmt(s.growth.equitySol, 3) + ' SOL' : '—'],
+        ['Pace', s.growth ? fmt(s.growth.paceSol, 3) + ' SOL' : '—'],
+        ['Target', s.growth ? s.growth.targetSol + ' SOL' : '—'],
+        ['Deploy', s.growth ? fmt(s.growth.deploySol, 3) + ' SOL' : (s.config.solDeploy + ' SOL')],
+        ['Realized', '$' + fmt(s.book?.realizedUsd, 4)],
+        ['Open', '$' + fmt(openNet(s), 4)],
       ].map(([k,v]) => '<div class="card"><div class="label">' + k + '</div><div class="value">' + v + '</div></div>').join('');
 
       const ls = s.lastScan;
       document.getElementById('lastScan').innerHTML = ls ? (
         '<div><strong>' + esc(ls.decision.toUpperCase()) + '</strong> · ' + esc(ls.poolName) + '</div>' +
         '<div class="mono" style="margin-top:6px;color:var(--muted)">' +
-        'score ' + fmt(ls.opportunityScore) + ' · met ' + ls.metThreshold + ' · jup ' + ls.jupiterScore +
-        ' · v/tvl ' + fmt(ls.volumeToTvlRatio) + ' · fee/tvl ' + fmt(ls.feeToTvlRatio,4) +
+        esc(ls.venue || 'n/a') + ' · ' + esc(ls.reason || '') +
+        ' · edge $' + fmt(ls.opportunityScore, 3) + ' · fee/tvl ' + fmt(ls.feeToTvlRatio, 4)
         '</div><div class="mono" style="margin-top:4px;color:var(--muted)">' + esc(s.lastScanAt||'') + '</div>'
       ) : '<span style="color:var(--muted)">No scans yet</span>';
 
       const p = s.activePosition;
       document.getElementById('position').innerHTML = p ? (
-        '<div><strong>' + esc(p.poolName) + '</strong> (' + esc(p.id) + ')</div>' +
+        '<div><strong>' + esc(p.venue) + ' ' + esc(p.poolName) + '</strong> (' + esc(p.id) + ' · ' + esc(p.side) + ')</div>' +
         '<div class="mono" style="margin-top:6px;color:var(--muted)">' +
-        esc(p.solDeployed) + ' SOL · bins ' + p.minBinId + '..' + p.maxBinId + '<br>' +
-        'pool ' + esc(p.poolAddress) + '<br>pos ' + esc(p.positionAddress) +
+        esc(p.solDeployed) + ' SOL · fees $' + fmt(p.feesAccruedUsd, 4) +
+        ' · divergence $' + fmt(p.ilUsd, 4) + ' · costs $' + fmt(p.costsUsd, 4) +
+        ' · after exit $' + fmt((p.feesAccruedUsd||0) - (p.ilUsd||0) - (p.costsUsd||0) - 0.02, 4) + '<br>' +
+        'pool ' + esc(p.poolAddress) +
         '</div>'
       ) : '<span style="color:var(--muted)">No active position</span>';
 
       const hist = s.scanHistory?.[0]?.topCandidates || [];
       document.getElementById('candidates').innerHTML = hist.length ? (
-        '<table><thead><tr><th>Pool</th><th>Token</th><th>Score</th><th>Threshold</th></tr></thead><tbody>' +
-        hist.map(c => '<tr><td>' + esc(c.poolName) + '</td><td>' + esc(c.tokenSymbol) +
-        '</td><td>' + fmt(c.opportunityScore) + '</td><td>' + (c.metThreshold ? badge('YES','ok') : badge('NO','warn')) + '</td></tr>').join('') +
+        '<table><thead><tr><th>Pool</th><th>Venue</th><th>Shape</th><th>Edge after costs</th><th>Fee 30m</th><th>Gate</th></tr></thead><tbody>' +
+        hist.map(c => '<tr><td>' + esc(c.poolName) + '</td><td>' + esc(c.venue) +
+        '</td><td>' + esc(c.side || '') +
+        '</td><td>$' + fmt(c.edgeUsd, 3) + '</td><td>$' + fmt(c.fee30m, 0) +
+        '</td><td>' + (c.metThreshold ? badge('PASS','ok') : badge('SKIP','warn')) + '</td></tr>').join('') +
         '</tbody></table>'
       ) : '<span style="color:var(--muted)">—</span>';
 
@@ -232,7 +247,7 @@ function dashboardHtml(): string {
         '<div style="padding:8px 0;border-bottom:1px solid var(--border)">' +
         '<span class="mono" style="color:var(--muted)">' + esc(h.at) + '</span> · ' +
         '<strong>' + esc(h.check.decision) + '</strong> · ' + esc(h.check.poolName) +
-        ' · score ' + fmt(h.check.opportunityScore) +
+        ' · ' + esc(h.check.reason || '') +
         '</div>'
       ).join('') || '<span style="color:var(--muted)">—</span>';
 
@@ -251,8 +266,8 @@ function dashboardHtml(): string {
     async function resumeBot() { await api('/api/resume', 'POST'); await refresh(); }
     async function scanNow() { await api('/api/scan', 'POST'); await refresh(); }
 
-    refresh();
-    setInterval(refresh, 10000);
+    refresh().catch((err) => { document.getElementById('errorText').textContent = err.message; document.getElementById('errorBox').style.display = 'block'; });
+    setInterval(() => refresh().catch(() => {}), 4000);
   </script>
 </body>
 </html>`;

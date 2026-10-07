@@ -1,29 +1,28 @@
 import { DegenLpBot } from "./bot.js";
-import { config } from "./config.js";
-import { fetchTopPumpTokens, buildCandidates } from "./apis.js";
-import { pickBestCandidate, computeMetrics } from "./scorer.js";
+import { fetchMeteoraCandidates } from "./meteora.js";
+import { rankPools } from "./scorer.js";
 import { runDeploy } from "./deploy.js";
 
 const cmd = process.argv[2] ?? "run";
 
 async function main() {
   if (cmd === "scan") {
-    const tokens = await fetchTopPumpTokens(config.topTokensLimit);
-    const candidates = await buildCandidates(tokens);
-    const ranked = candidates
-      .map((c) => ({ candidate: c, metrics: computeMetrics(c) }))
-      .sort((a, b) => b.metrics.opportunityScore - a.metrics.opportunityScore)
-      .slice(0, 10);
-
-    console.log(JSON.stringify({ top: ranked }, null, 2));
-
-    const best = pickBestCandidate(candidates);
-    if (!best) {
-      console.log("\nNo pool met threshold right now.");
-      return;
-    }
-    console.log("\nBest qualifying pool:");
-    console.log(JSON.stringify({ best, metrics: computeMetrics(best) }, null, 2));
+    const candidates = await fetchMeteoraCandidates();
+    const ranked = rankPools(candidates).slice(0, 12).map((row) => ({
+      venue: row.pool.venue,
+      pool: row.pool.poolName,
+      address: row.pool.poolAddress,
+      side: row.pool.side,
+      tvl: Math.round(row.pool.pairLiquidityUsd),
+      fee30m: Math.round(row.pool.fee30mUsd),
+      score: Number(row.metrics.opportunityScore.toFixed(3)),
+      edge: Number(row.metrics.edgeUsd.toFixed(3)),
+      met: row.metrics.metThreshold,
+      holders: row.pool.holders,
+      ageMin: row.pool.createdAtMs ? Math.round((Date.now() - row.pool.createdAtMs) / 60_000) : null,
+    }));
+    const ready = ranked.filter((row) => row.met).length;
+    console.log(JSON.stringify({ pools: candidates.length, ready, top: ranked }, null, 2));
     return;
   }
 

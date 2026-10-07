@@ -13,7 +13,8 @@
     "scan": "tsx src/index.ts scan",
     "once": "tsx src/index.ts once",
     "deploy-contract": "tsx src/index.ts deploy-contract",
-    "build": "tsc"
+    "build": "tsc",
+    "test": "tsx --test src/pnl.test.ts src/edge.test.ts src/growth.test.ts src/plan.test.ts"
   },
   "keywords": [],
   "author": "",

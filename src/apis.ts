@@ -92,6 +92,16 @@ export async function buildCandidates(tokens: JupiterToken[]): Promise<PoolCandi
       volume5m: tokenVolume5m(token),
       priceUsd: Number(best.priceUsd ?? 0),
       jupiterScore: jupiterScoreFromOrganic(token.organicScore ?? 0),
+      venue: "dlmm",
+      side: "bid",
+      fee30mUsd: 0,
+      fee1hUsd: 0,
+      volume30mUsd: tokenVolume5m(token) * 6,
+      holders: 0,
+      createdAtMs: 0,
+      freezeDisabled: true,
+      solPrice: 0,
+      rangeHalfWidth: 0.1,
     });
   }
 
