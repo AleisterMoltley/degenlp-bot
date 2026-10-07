@@ -383,6 +383,35 @@ test("the first meme atom closes before the scratch price", () => {
   assert.doesNotMatch(plan.closes[0].reason, /remains in the wallet/);
 });
 
+test("a watched meme stays on the scanner and does not skip the gate", () => {
+  const others = Array.from({ length: 9 }, (_, i) =>
+    paying({
+      poolAddress: `pay-${i}`,
+      tokenMint: `pay-${i}`,
+      tokenSymbol: `P${i}`,
+      poolName: `P${i}-SOL`,
+      fee30mUsd: 40_000 - i,
+    }),
+  );
+  const giant = paying({
+    poolAddress: "giant",
+    tokenMint: "stonk",
+    tokenSymbol: "STONK",
+    poolName: "STONK-SOL",
+    pairLiquidityUsd: 2_200_000,
+    tokenLiquidityUsd: 2_200_000,
+    baseFeePct: 0.08,
+    fee30mUsd: 600,
+    watched: true,
+  });
+  const plan = planFleet({ pools: [...others, giant], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.equal(plan.opens.some((row) => row.pool.poolAddress === "giant"), false);
+  assert.equal(plan.preview[0]?.tokenSymbol, "STONK");
+  assert.equal(plan.preview[0]?.metThreshold, false);
+  assert.ok(plan.preview.some((row) => row.tokenSymbol === "STONK"));
+  assert.ok(plan.opens.length >= 1);
+});
+
 test("a falling tape and a wide bin block the entry", () => {
   const falling = planFleet({
     pools: [pool()],

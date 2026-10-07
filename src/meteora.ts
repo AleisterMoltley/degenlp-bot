@@ -305,3 +305,42 @@ export async function fetchMeteoraCandidates(): Promise<PoolCandidate[]> {
   }
   return out;
 }
+
+/** Below this, a watched pool is an empty shell. The open gate stays higher. */
+const WATCH_MIN_TVL_USD = 1_000;
+
+/** Hottest SOL DLMM for one mint. Dust under $1,000 is left out. */
+export function bestSolDlmm(pools: PoolCandidate[]): PoolCandidate | null {
+  const fit = pools.filter((pool) => pool.venue === "dlmm" && pool.pairLiquidityUsd >= WATCH_MIN_TVL_USD);
+  fit.sort((a, b) => b.fee30mUsd - a.fee30mUsd);
+  return fit[0] ?? null;
+}
+
+/** SOL DLMM for mints the fee pages can miss. One pool per mint. A failed mint is skipped. */
+export async function fetchSolDlmmByMints(mints: string[]): Promise<PoolCandidate[]> {
+  const unique = [...new Set(mints.map((mint) => mint.trim()).filter(Boolean))];
+  const out: PoolCandidate[] = [];
+  let cursor = 0;
+  async function worker(): Promise<void> {
+    while (cursor < unique.length) {
+      const mint = unique[cursor];
+      cursor += 1;
+      try {
+        const url =
+          "https://dlmm.datapi.meteora.ag/pools?" +
+          new URLSearchParams({ page: "1", page_size: "30", query: mint });
+        const body = await getJson<{ data?: ApiPool[] }>(url);
+        const rows = (body.data ?? [])
+          .map((pool) => fromApiPool(pool, "dlmm"))
+          .filter((pool): pool is PoolCandidate => !!pool && pool.tokenMint === mint);
+        const best = bestSolDlmm(rows);
+        if (best) out.push(best);
+      } catch {
+        // One mint missing does not drop the rest of the list.
+      }
+    }
+  }
+  const workers = Math.min(8, unique.length);
+  if (workers > 0) await Promise.all(Array.from({ length: workers }, () => worker()));
+  return out;
+}

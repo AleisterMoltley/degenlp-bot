@@ -8,6 +8,7 @@ import { deploySolFor, equitySol, paceSol } from "./growth.js";
 import { DlmmExecutor, enterPositionDryRun } from "./executor.js";
 import { loadWalletKeypair, saveWalletSecret } from "./wallet.js";
 import { fetchMeteoraCandidates } from "./meteora.js";
+import { mergeWatched, watchedMemePools } from "./watched.js";
 import { accrueFees, entryCostUsd, markIlUsd } from "./pnl.js";
 import { hydratePosition } from "./position.js";
 import { measureRpcLatency, ProofNetworkTelemetry } from "./proofnetwork.js";
@@ -152,7 +153,8 @@ export class DegenLpBot {
 
   private async independentScan(): Promise<OpportunityCheck> {
     const started = Date.now();
-    const candidates = await fetchMeteoraCandidates();
+    const [catalog, watched] = await Promise.all([fetchMeteoraCandidates(), watchedMemePools()]);
+    const candidates = mergeWatched(catalog, watched);
     const now = Date.now();
     const held = new Set(this.state.seats.map((seat) => seat.poolAddress));
     const tradable = candidates.filter((pool) => {
@@ -205,7 +207,7 @@ export class DegenLpBot {
     const check = this.fleetCheck(plan, now);
 
     console.log(
-      `[scan] ${check.decision} seats=${this.state.seats.length} deploy=${this.deploySol.toFixed(3)} equity=${equity.toFixed(3)} ${plan.summary} ${this.lastScanMs}ms pools=${candidates.length} dlmm=${this.poolCounts.dlmm} damm2=${this.poolCounts.damm_v2} damm1=${this.poolCounts.damm_v1} travel=${travelWatched}`,
+      `[scan] ${check.decision} seats=${this.state.seats.length} deploy=${this.deploySol.toFixed(3)} equity=${equity.toFixed(3)} ${plan.summary} ${this.lastScanMs}ms pools=${candidates.length} dlmm=${this.poolCounts.dlmm} damm2=${this.poolCounts.damm_v2} damm1=${this.poolCounts.damm_v1} travel=${travelWatched} watched=${candidates.filter((pool) => pool.watched).length}`,
     );
 
     await this.applyFleet(plan);
@@ -391,17 +393,12 @@ export class DegenLpBot {
       .slice(0, 8);
     const ids = new Map<string, number>();
     if (this.executor) {
-      await Promise.all(
-        shortlist.map(async (pool) => {
-          try {
-            const id = await this.executor!.poolActiveId(pool.poolAddress);
-            if (id == null || !Number.isInteger(id)) return;
-            ids.set(pool.poolAddress, id);
-          } catch {
-            console.error("[travel] active bin read failed");
-          }
-        }),
-      );
+      try {
+        const found = await this.executor.poolActiveIds(shortlist.map((pool) => pool.poolAddress));
+        for (const [address, id] of found) ids.set(address, id);
+      } catch {
+        console.error("[travel] active bin read failed");
+      }
     } else if (config.dryRun) {
       for (const pool of shortlist) {
         const id = priceBinId(pool.priceUsd, pool.binStep ?? 0);
@@ -767,19 +764,21 @@ export class DegenLpBot {
   }
 
   private async readOpenPools(seats: ActivePosition[]): Promise<void> {
+    if (!this.executor) return;
     this.syncWatches(seats);
     const pools = [...new Set(seats.map((seat) => seat.poolAddress))];
-    await Promise.all(
-      pools.map(async (pool) => {
-        try {
-          const activeId = await this.executor!.poolActiveId(pool);
-          if (activeId == null) return;
-          await this.onActiveBin(pool, activeId);
-        } catch {
-          console.error("[fill] pool read failed");
-        }
-      }),
-    );
+    let found: Map<string, number>;
+    try {
+      found = await this.executor.poolActiveIds(pools);
+    } catch {
+      console.error("[fill] pool read failed");
+      return;
+    }
+    for (const pool of pools) {
+      const activeId = found.get(pool);
+      if (activeId == null) continue;
+      await this.onActiveBin(pool, activeId);
+    }
   }
 
   private syncWatches(seats: ActivePosition[]): void {

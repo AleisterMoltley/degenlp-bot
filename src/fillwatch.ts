@@ -11,6 +11,22 @@ export function activeIdFromPool(data: Uint8Array): number | null {
   return new DataView(data.buffer, data.byteOffset, data.byteLength).getInt32(LBPAIR_ACTIVE_ID_OFFSET, true);
 }
 
+/** One batched account read, in the same order as `addresses`. A null account stays unset. */
+export function activeIdsFromAccounts(
+  addresses: string[],
+  infos: Array<{ data: Uint8Array } | null>,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  for (let i = 0; i < addresses.length; i += 1) {
+    const info = infos[i];
+    if (!info) continue;
+    const id = activeIdFromPool(info.data);
+    if (id == null || !Number.isInteger(id)) continue;
+    out.set(addresses[i], id);
+  }
+  return out;
+}
+
 /**
  * A one-bin bid sits under the price. The fill is the slot that steps the
  * active bin onto that id or through it. Hearing it still takes the next slot.

@@ -10,7 +10,7 @@ import {
 } from "@solana/web3.js";
 import BN from "bn.js";
 import { config } from "./config.js";
-import { activeIdFromPool } from "./fillwatch.js";
+import { activeIdFromPool, activeIdsFromAccounts } from "./fillwatch.js";
 import { buildJupiterSwap, sellSlices, SOL_MINT } from "./jupiter.js";
 import { buildPosition } from "./position.js";
 import type { ActivePosition, OpportunityCheck, PoolCandidate } from "./types.js";
@@ -63,9 +63,35 @@ export class DlmmExecutor {
 
   /** Active bin from the pair account. Processed, so it is the latest slot. */
   async poolActiveId(poolAddress: string): Promise<number | null> {
-    const info = await this.connection.getAccountInfo(new PublicKey(poolAddress), "processed");
-    if (!info) return null;
-    return activeIdFromPool(info.data);
+    const found = await this.poolActiveIds([poolAddress]);
+    return found.get(poolAddress) ?? null;
+  }
+
+  /** Active bins for many pairs. One getMultipleAccounts call per 100 addresses. */
+  async poolActiveIds(addresses: string[]): Promise<Map<string, number>> {
+    const unique = [...new Set(addresses.filter(Boolean))];
+    const out = new Map<string, number>();
+    const keys: Array<{ address: string; key: PublicKey }> = [];
+    for (const address of unique) {
+      try {
+        keys.push({ address, key: new PublicKey(address) });
+      } catch {
+        // A bad address is skipped. The pool stays closed for this scan.
+      }
+    }
+    for (let i = 0; i < keys.length; i += 100) {
+      const slice = keys.slice(i, i + 100);
+      const infos = await this.connection.getMultipleAccountsInfo(
+        slice.map((row) => row.key),
+        "processed",
+      );
+      const found = activeIdsFromAccounts(
+        slice.map((row) => row.address),
+        infos,
+      );
+      for (const [address, id] of found) out.set(address, id);
+    }
+    return out;
   }
 
   /** Fires when the pair account changes. The id is read from the notification itself. */

@@ -111,6 +111,8 @@ export interface PoolCandidate {
   chopNetBins?: number;
   /** USD value of SOL in the active bin. Missing means the depth was not read. */
   binSolUsd?: number;
+  /** On the DexScreener Solana trending list. The same gates still apply. */
+  watched?: boolean;
   /** Active-bin tape. Missing means the pool was not watched. */
   binTapeSamples?: number;
   binTapeSpanMs?: number;

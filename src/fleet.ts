@@ -38,6 +38,7 @@ export interface FleetPreview {
   edgeUsd: number;
   fee30m: number;
   metThreshold: boolean;
+  watched?: boolean;
 }
 
 export interface FleetPlan {
@@ -419,10 +420,10 @@ export function planFleet(args: {
         edgeUsd: quoted.metrics.edgeUsd,
         fee30m: pool.fee30mUsd,
         metThreshold: quoted.metrics.metThreshold && !blockedByGate && !quiet,
+        watched: pool.watched === true,
       };
     })
-    .sort((a, b) => b.edgeUsd - a.edgeUsd)
-    .slice(0, 8);
+    .sort((a, b) => b.edgeUsd - a.edgeUsd);
 
   for (const open of opens) {
     const row = preview.find((item) => item.poolAddress === open.pool.poolAddress);
@@ -434,6 +435,10 @@ export function planFleet(args: {
     row.opportunityScore = open.metrics.opportunityScore;
   }
   preview.sort((a, b) => b.edgeUsd - a.edgeUsd);
+  const watchedRows = preview.filter((row) => row.watched).sort((a, b) => b.edgeUsd - a.edgeUsd);
+  const rest = preview.filter((row) => !row.watched);
+  const cap = Math.max(8, Math.min(24, watchedRows.length || 8));
+  preview.splice(0, preview.length, ...[...watchedRows, ...rest].slice(0, cap));
 
   const names = opens.map((row) => `${row.strategy} ${row.pool.tokenSymbol} ${row.solDeploy.toFixed(3)}`).join(", ");
   const falling = args.pools.some((pool) => pool.venue === "dlmm" && tapeBlocksEntry(pool, args.moves));
