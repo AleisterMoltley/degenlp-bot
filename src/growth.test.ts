@@ -4,7 +4,7 @@ import { deploySolFor, equitySol, paceSol } from "./growth.js";
 
 const week = 7 * 24 * 60 * 60 * 1000;
 
-test("the week pace starts at 1 SOL and finishes at 30", () => {
+test("the pace passes 30 SOL and keeps compounding", () => {
   const start = 1_000;
   assert.equal(paceSol({ startSol: 1, targetSol: 30, startedAt: start, now: start, weekMs: week }), 1);
   const end = paceSol({ startSol: 1, targetSol: 30, startedAt: start, now: start + week, weekMs: week });
@@ -12,6 +12,8 @@ test("the week pace starts at 1 SOL and finishes at 30", () => {
   const mid = paceSol({ startSol: 1, targetSol: 30, startedAt: start, now: start + week / 2, weekMs: week });
   assert.ok(mid > 1 && mid < 30);
   assert.ok(Math.abs(mid - Math.sqrt(30)) < 1e-9);
+  const second = paceSol({ startSol: 1, targetSol: 30, startedAt: start, now: start + week * 2, weekMs: week });
+  assert.ok(Math.abs(second - 900) < 1e-6);
 });
 
 test("deploy is a capped fraction of equity and compounds after a win", () => {
@@ -20,6 +22,8 @@ test("deploy is a capped fraction of equity and compounds after a win", () => {
   assert.equal(after, 1.4);
   assert.ok(deploySolFor(after, 0.72) > 0.72);
   assert.equal(deploySolFor(0, 0.72), 0);
+  assert.equal(deploySolFor(100, 0.72), 72);
+  assert.equal(deploySolFor(1000, 0.72), 720);
 });
 
 test("open pnl marks the equity in SOL", () => {

@@ -51,6 +51,8 @@ export interface ActivePosition {
   enteredAt: number;
   venue: PoolVenue;
   side: LpSide;
+  /** skim = short SOL bid. core = the strict seat. Missing means core. */
+  strategy?: "skim" | "core";
   feesAccruedUsd: number;
   ilUsd: number;
   costsUsd: number;

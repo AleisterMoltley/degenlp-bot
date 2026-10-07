@@ -32,12 +32,29 @@ export function jupiterScoreFromOrganic(organicScore: number): number {
   return Math.min(92, Math.round(organicScore));
 }
 
-export function computeMetrics(candidate: PoolCandidate, deploySol = config.solDeploy, growth = false): Metrics {
-  if (candidate.fee30mUsd > 0) return computeFeeMetrics(candidate, deploySol, growth);
+export interface QuoteOpts {
+  holdMin?: number;
+  fillFraction?: number;
+  swapBps?: number;
+  lockSide?: boolean;
+}
+
+export function computeMetrics(
+  candidate: PoolCandidate,
+  deploySol = config.solDeploy,
+  growth = false,
+  quote?: QuoteOpts,
+): Metrics {
+  if (candidate.fee30mUsd > 0) return computeFeeMetrics(candidate, deploySol, growth, quote);
   return computeLegacyMetrics(candidate);
 }
 
-function computeFeeMetrics(candidate: PoolCandidate, deploySol = config.solDeploy, growth = false): Metrics {
+function computeFeeMetrics(
+  candidate: PoolCandidate,
+  deploySol = config.solDeploy,
+  growth = false,
+  quote?: QuoteOpts,
+): Metrics {
   const volume30m = candidate.volume30mUsd;
   const fee30m = candidate.fee30mUsd;
   const poolTvl = candidate.pairLiquidityUsd;
@@ -56,13 +73,14 @@ function computeFeeMetrics(candidate: PoolCandidate, deploySol = config.solDeplo
     ? Math.max(config.minEdgeUsd, deploySol * (candidate.solPrice || 0) * 0.003)
     : config.minEdgeUsd;
   const edgeInput = {
-    holdMin: config.scalpHoldMin,
+    holdMin: quote?.holdMin ?? config.scalpHoldMin,
     txCostUsd: config.txCostUsd,
-    swapBps: config.swapBps,
+    swapBps: quote?.swapBps ?? (config.dryRun ? config.swapBps : Math.max(config.swapBps, 300)),
     minEdgeUsd,
     deploySol,
+    fillFraction: quote?.fillFraction,
   };
-  if (candidate.venue === "dlmm" && config.dryRun) {
+  if (candidate.venue === "dlmm" && !quote?.lockSide) {
     candidate.side = chooseShape(candidate, edgeInput);
   }
   const edge = quoteEdge(candidate, edgeInput);
@@ -296,7 +314,7 @@ export function planPosition(args: {
   const above = price > active.priceUpper;
   const below = price < active.priceLower;
   const inside = inBand(price, active.priceLower, active.priceUpper);
-  const deployUsd = config.solDeploy * (current?.pool.solPrice || active.solPrice || 0);
+  const deployUsd = active.solDeployed * (current?.pool.solPrice || active.solPrice || 0);
   const liveIl =
     deployUsd > 0
       ? markIlUsd({

@@ -1,4 +1,4 @@
-/** Compound a 1 SOL paper bankroll toward a week target. The pace is geometric. */
+/** Reference pace. The weekly multiple keeps compounding and does not cap size. */
 
 export function paceSol(args: {
   startSol: number;
@@ -10,7 +10,7 @@ export function paceSol(args: {
   const start = Math.max(args.startSol, 1e-9);
   const target = Math.max(args.targetSol, start);
   const span = Math.max(args.weekMs, 1);
-  const t = Math.min(1, Math.max(0, (args.now - args.startedAt) / span));
+  const t = Math.max(0, (args.now - args.startedAt) / span);
   return start * Math.pow(target / start, t);
 }
 

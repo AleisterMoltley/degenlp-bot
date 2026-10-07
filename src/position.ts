@@ -11,6 +11,7 @@ export function buildPosition(args: {
   minBinId?: number;
   maxBinId?: number;
   entrySignature?: string;
+  strategy?: ActivePosition["strategy"];
 }): ActivePosition {
   const band = priceBand(args.pool.priceUsd, args.pool.rangeHalfWidth, args.pool.side);
   const now = Date.now();
@@ -37,6 +38,7 @@ export function buildPosition(args: {
     enteredAt: now,
     venue: args.pool.venue,
     side: args.pool.side,
+    strategy: args.strategy ?? "core",
     feesAccruedUsd: 0,
     ilUsd: 0,
     costsUsd: 0,
@@ -61,6 +63,7 @@ export function hydratePosition(pos: ActivePosition): ActivePosition {
     ...pos,
     venue: pos.venue ?? "dlmm",
     side,
+    strategy: pos.strategy === "skim" ? "skim" : "core",
     feesAccruedUsd: pos.feesAccruedUsd ?? 0,
     ilUsd: pos.ilUsd ?? 0,
     costsUsd: pos.costsUsd ?? 0,

@@ -7,6 +7,8 @@ export interface EdgeInput {
   swapBps: number;
   minEdgeUsd: number;
   deploySol: number;
+  /** Bid inventory charged up front. Defaults to a 4% fill. A skim passes a one-bin touch. */
+  fillFraction?: number;
 }
 
 export interface EdgeQuote {
@@ -58,7 +60,13 @@ export function quoteEdge(pool: PoolCandidate, input: EdgeInput): EdgeQuote {
       txCostUsd: input.txCostUsd,
       swapBps: input.swapBps,
     }) + input.txCostUsd;
-  const ilBudgetUsd = adverseBudget(pool.side, deployUsd, pool.priceUsd, pool.rangeHalfWidth);
+  const ilBudgetUsd = adverseBudget(
+    pool.side,
+    deployUsd,
+    pool.priceUsd,
+    pool.rangeHalfWidth,
+    input.fillFraction ?? 0.04,
+  );
   const edgeUsd = expectedFeesUsd - roundTripUsd - ilBudgetUsd;
   return {
     feePerMin,
@@ -79,8 +87,15 @@ function timeInRange(pool: PoolCandidate, holdMin: number): number {
   return Math.min(1, Math.max(0.2, room / Math.max(noise, 1e-6)));
 }
 
-function adverseBudget(side: LpSide, deployUsd: number, price: number, half: number): number {
-  if (side === "bid") return deployUsd * 0.002;
+function adverseBudget(
+  side: LpSide,
+  deployUsd: number,
+  price: number,
+  half: number,
+  fillFraction: number,
+): number {
+  // A filled bid owns the meme. The strict seat charges a 4% fill. A skim charges a one-bin touch.
+  if (side === "bid") return deployUsd * fillFraction;
   if (side === "full") {
     return markIlUsd({
       deployUsd,
@@ -92,15 +107,16 @@ function adverseBudget(side: LpSide, deployUsd: number, price: number, half: num
     });
   }
   if (side === "curve") {
-    const move = Math.min(Math.max(half * 0.5, 0.01), 0.03);
-    return markIlUsd({
+    const move = 0.1;
+    const marked = markIlUsd({
       deployUsd,
       entryPrice: price,
       price: price * (1 - move),
-      lower: price * (1 - Math.max(half, move)),
-      upper: price * (1 + Math.max(half, move)),
+      lower: price * (1 - half),
+      upper: price * (1 + half),
       side: "curve",
     });
+    return Math.max(marked, deployUsd * 0.1);
   }
   const move = Math.min(Math.max(half, 0.01), 0.04);
   return markIlUsd({
@@ -124,12 +140,13 @@ export function feeHeat(pool: { fee30mUsd: number; fee1hUsd: number }): FeeHeat 
   return "flat";
 }
 
-/** DLMM can sit as a SOL bid or as a tight both-sided curve. Keep whichever nets more. */
+/** DLMM can sit as a SOL bid or a curve. The curve must clear the bid plus an inventory hurdle. */
 export function chooseShape(pool: PoolCandidate, input: EdgeInput): LpSide {
   if (pool.venue !== "dlmm") return pool.side;
   const bid = quoteEdge({ ...pool, side: "bid" }, input);
   const curve = quoteEdge({ ...pool, side: "curve" }, input);
-  return curve.edgeUsd > bid.edgeUsd ? "curve" : "bid";
+  const deployUsd = input.deploySol * (pool.solPrice || 0);
+  return curve.edgeUsd > bid.edgeUsd + deployUsd * 0.1 ? "curve" : "bid";
 }
 
 export function bankableUsd(fees: number, il: number, costs: number, exitTx: number): number {

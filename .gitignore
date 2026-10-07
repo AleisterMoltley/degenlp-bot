@@ -2,6 +2,8 @@ node_modules/
 dist/
 .env
 .degenlp-state.json
+.wallet
+.railway/
 data/
 *.log
 .DS_Store

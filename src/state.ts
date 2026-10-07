@@ -12,6 +12,7 @@ export interface GrowthLedger {
 export interface BotState {
   positionSeq: number;
   active: ActivePosition | null;
+  seats: ActivePosition[];
   closed: ActivePosition[];
   book: Book;
   growth?: GrowthLedger;
@@ -33,6 +34,7 @@ export function emptyBook(): Book {
 const defaultState = (): BotState => ({
   positionSeq: 0,
   active: null,
+  seats: [],
   closed: [],
   book: emptyBook(),
 });
@@ -53,9 +55,13 @@ export function loadState(): BotState {
   if (!existsSync(config.stateFile)) return defaultState();
   try {
     const parsed = JSON.parse(readFileSync(config.stateFile, "utf8")) as Partial<BotState>;
+    const active = parsed.active ?? null;
+    const listed = Array.isArray(parsed.seats) ? parsed.seats : [];
+    const seats = listed.length ? listed : active ? [active] : [];
     return {
       positionSeq: parsed.positionSeq ?? 0,
-      active: parsed.active ?? null,
+      active: seats[0] ?? null,
+      seats,
       closed: parsed.closed ?? [],
       book: { ...emptyBook(), ...(parsed.book ?? {}) },
       growth: parsed.growth,

@@ -29,7 +29,7 @@ function pool(fee30mUsd: number, over: Partial<PoolCandidate> = {}): PoolCandida
   };
 }
 
-const input = { holdMin: 4, txCostUsd: 0.02, swapBps: 40, minEdgeUsd: 0.02, deploySol: 0.05 };
+const input = { holdMin: 12, txCostUsd: 0.02, swapBps: 40, minEdgeUsd: 0.02, deploySol: 0.72 };
 
 test("a hot bid clears the round trip", () => {
   const quote = quoteEdge(pool(2500), input);
@@ -49,14 +49,17 @@ test("a heating tape is worth more than a flat one with the same fees", () => {
   assert.ok(hot.expectedFeesUsd > flat.expectedFeesUsd);
 });
 
-test("a hot DLMM pool takes the curve when it nets more than the bid", () => {
+test("a hot DLMM pool keeps the bid unless the curve clears the inventory hurdle", () => {
   const sample = pool(2500);
-  const side = chooseShape(sample, input);
   const bid = quoteEdge({ ...sample, side: "bid" }, input);
   const curve = quoteEdge({ ...sample, side: "curve" }, input);
-  assert.ok(curve.expectedFeesUsd > bid.expectedFeesUsd);
-  assert.equal(side, curve.edgeUsd > bid.edgeUsd ? "curve" : "bid");
-  assert.equal(side, "curve");
+  const deployUsd = input.deploySol * sample.solPrice;
+  assert.ok(curve.ilBudgetUsd >= deployUsd * 0.1 - 1e-9);
+  assert.ok(Math.abs(bid.ilBudgetUsd - deployUsd * 0.04) < 1e-9);
+  assert.equal(chooseShape(sample, input), "bid");
+
+  const monster = pool(20_000, { pairLiquidityUsd: 20_000 });
+  assert.equal(chooseShape(monster, input), "curve");
 });
 
 test("a tight bid keeps less of the printed fees than a wide one", () => {
@@ -67,8 +70,8 @@ test("a tight bid keeps less of the printed fees than a wide one", () => {
 });
 
 test("a cooling pool is haircut below the gate", () => {
-  const hot = quoteEdge(pool(1200), input);
-  const cooling = quoteEdge(pool(1200, { fee1hUsd: 1200 * 4 }), input);
+  const hot = quoteEdge(pool(2500), input);
+  const cooling = quoteEdge(pool(2500, { fee1hUsd: 10_000 }), input);
   assert.equal(hot.profitable, true);
   assert.ok(cooling.expectedFeesUsd < hot.expectedFeesUsd);
   assert.equal(cooling.profitable, false);

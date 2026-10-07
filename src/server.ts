@@ -16,7 +16,9 @@ function authMiddleware(
   }
 
   const decoded = Buffer.from(header.slice(6), "base64").toString("utf8");
-  const [user, pass] = decoded.split(":");
+  const sep = decoded.indexOf(":");
+  const user = sep === -1 ? decoded : decoded.slice(0, sep);
+  const pass = sep === -1 ? "" : decoded.slice(sep + 1);
   if (user === config.dashboardUser && pass === config.dashboardPassword) {
     return next();
   }
@@ -45,6 +47,24 @@ export function createServer() {
   app.post("/api/resume", authMiddleware, (_req, res) => {
     getBot().resume();
     res.json({ ok: true, paused: false });
+  });
+
+  app.post("/api/wallet", authMiddleware, (req, res) => {
+    if (!config.dashboardPassword) {
+      return res.status(403).json({ ok: false, error: "Set a dashboard password before arming a key" });
+    }
+    const raw = typeof req.body?.privateKey === "string" ? req.body.privateKey : "";
+    if (req.body && typeof req.body === "object") req.body.privateKey = "";
+    try {
+      const armed = getBot().armWallet(raw);
+      res.json({ ok: true, publicKey: armed.publicKey });
+    } catch (err) {
+      const paper = err instanceof Error && err.message === "This desk is in paper mode";
+      res.status(paper ? 409 : 400).json({
+        ok: false,
+        error: paper ? "This desk is in paper mode" : "Key was rejected",
+      });
+    }
   });
 
   app.post("/api/scan", authMiddleware, async (_req, res) => {
@@ -138,7 +158,17 @@ function dashboardHtml(): string {
 <body>
   <div class="wrap">
     <h1>Degen LP</h1>
-    <p class="sub">Paper growth desk. It compounds a 1 SOL bankroll into the pool with the best edge after costs. The week target is 30 SOL. A seat is cut when it gives back 12% of its size. The path is not a promise.</p>
+    <p class="sub">Growth desk. Each seat is capped, a falling tape blocks a new entry, and a fast tape scratches a bid early. Two risk cuts pause new entries. It keeps compounding with no SOL cap. Arming a key on a live desk trades for real. The path is not a promise.</p>
+
+    <div class="section card" id="armCard">
+      <div class="label">Wallet</div>
+      <p id="walletLine" class="mono" style="color:var(--muted);margin-top:8px"></p>
+      <form id="armForm" autocomplete="off" style="display:none;gap:8px;flex-wrap:wrap;margin-top:10px">
+        <input id="walletKey" type="password" autocomplete="off" spellcheck="false" placeholder="Private key (base58 or byte array)" style="flex:1;min-width:240px;background:#0b1210;color:var(--text);border:1px solid var(--border);border-radius:10px;padding:10px 12px" />
+        <button class="primary" type="submit">Arm and trade</button>
+      </form>
+      <div id="armMsg" class="mono" style="margin-top:8px"></div>
+    </div>
 
     <div class="actions">
       <button class="primary" onclick="scanNow()">Scan now</button>
@@ -155,7 +185,7 @@ function dashboardHtml(): string {
     </div>
 
     <div class="section card">
-      <div class="label">Active position</div>
+      <div class="label">Seats</div>
       <div id="position" style="margin-top:10px"></div>
     </div>
 
@@ -176,10 +206,12 @@ function dashboardHtml(): string {
   </div>
 
   <script>
+    function seatsOf(s) {
+      if (Array.isArray(s.seats)) return s.seats;
+      return s.activePosition ? [s.activePosition] : [];
+    }
     function openNet(s) {
-      const p = s.activePosition;
-      if (!p) return 0;
-      return (p.feesAccruedUsd||0) - (p.ilUsd||0) - (p.costsUsd||0);
+      return seatsOf(s).reduce((sum, p) => sum + (p.feesAccruedUsd||0) - (p.ilUsd||0) - (p.costsUsd||0), 0);
     }
     function badge(text, cls) { return '<span class="badge ' + cls + '">' + text + '</span>'; }
     function fmt(n, d=3) { return Number(n||0).toFixed(d); }
@@ -194,7 +226,19 @@ function dashboardHtml(): string {
     function renderStatus(s) {
       const mode = s.config.dryRun ? badge('DRY RUN', 'warn') : badge('LIVE', 'danger');
       const run = s.paused ? badge('PAUSED', 'warn') : badge('RUNNING', 'ok');
-      const wallet = s.config.walletConfigured ? badge('WALLET OK', 'ok') : badge('NO WALLET', 'warn');
+      const wallet = s.config.walletConfigured ? badge('ARMED', 'ok') : (s.config.dryRun ? badge('PAPER', 'warn') : badge('NEEDS KEY', 'danger'));
+      const walletLine = document.getElementById('walletLine');
+      const armForm = document.getElementById('armForm');
+      if (s.config.dryRun) {
+        walletLine.textContent = 'Paper desk. A key is not accepted here.';
+        armForm.style.display = 'none';
+      } else if (s.config.walletPublicKey) {
+        walletLine.textContent = 'Live. Signing as ' + s.config.walletPublicKey;
+        armForm.style.display = 'flex';
+      } else {
+        walletLine.textContent = 'Live. Paste a key and the next scan trades.';
+        armForm.style.display = 'flex';
+      }
 
       document.getElementById('stats').innerHTML = [
         ['Status', run],
@@ -207,8 +251,8 @@ function dashboardHtml(): string {
         ['Pools', (s.poolCounts ? (s.poolCounts.dlmm + '/' + s.poolCounts.damm_v2 + '/' + s.poolCounts.damm_v1) : '—')],
         ['Equity', s.growth ? fmt(s.growth.equitySol, 3) + ' SOL' : '—'],
         ['Pace', s.growth ? fmt(s.growth.paceSol, 3) + ' SOL' : '—'],
-        ['Target', s.growth ? s.growth.targetSol + ' SOL' : '—'],
         ['Deploy', s.growth ? fmt(s.growth.deploySol, 3) + ' SOL' : (s.config.solDeploy + ' SOL')],
+        ['Seats', String(seatsOf(s).length)],
         ['Realized', '$' + fmt(s.book?.realizedUsd, 4)],
         ['Open', '$' + fmt(openNet(s), 4)],
       ].map(([k,v]) => '<div class="card"><div class="label">' + k + '</div><div class="value">' + v + '</div></div>').join('');
@@ -222,22 +266,23 @@ function dashboardHtml(): string {
         '</div><div class="mono" style="margin-top:4px;color:var(--muted)">' + esc(s.lastScanAt||'') + '</div>'
       ) : '<span style="color:var(--muted)">No scans yet</span>';
 
-      const p = s.activePosition;
-      document.getElementById('position').innerHTML = p ? (
-        '<div><strong>' + esc(p.venue) + ' ' + esc(p.poolName) + '</strong> (' + esc(p.id) + ' · ' + esc(p.side) + ')</div>' +
-        '<div class="mono" style="margin-top:6px;color:var(--muted)">' +
-        esc(p.solDeployed) + ' SOL · fees $' + fmt(p.feesAccruedUsd, 4) +
-        ' · divergence $' + fmt(p.ilUsd, 4) + ' · costs $' + fmt(p.costsUsd, 4) +
-        ' · after exit $' + fmt((p.feesAccruedUsd||0) - (p.ilUsd||0) - (p.costsUsd||0) - 0.02, 4) + '<br>' +
-        'pool ' + esc(p.poolAddress) +
-        '</div>'
-      ) : '<span style="color:var(--muted)">No active position</span>';
+      const seats = seatsOf(s);
+      document.getElementById('position').innerHTML = seats.length ? (
+        '<table><thead><tr><th>Strategy</th><th>Pool</th><th>Size</th><th>Fees</th><th>Divergence</th><th>Net</th></tr></thead><tbody>' +
+        seats.map(p => '<tr><td>' + esc(p.strategy || 'core') + ' · ' + esc(p.side) +
+          '</td><td>' + esc(p.poolName) +
+          '</td><td>' + fmt(p.solDeployed, 3) + ' SOL</td><td>$' + fmt(p.feesAccruedUsd, 4) +
+          '</td><td>$' + fmt(p.ilUsd, 4) +
+          '</td><td>$' + fmt((p.feesAccruedUsd||0) - (p.ilUsd||0) - (p.costsUsd||0), 4) +
+          '</td></tr>').join('') +
+        '</tbody></table>'
+      ) : '<span style="color:var(--muted)">No open seats. A red quote stays in cash.</span>';
 
       const hist = s.scanHistory?.[0]?.topCandidates || [];
       document.getElementById('candidates').innerHTML = hist.length ? (
-        '<table><thead><tr><th>Pool</th><th>Venue</th><th>Shape</th><th>Edge after costs</th><th>Fee 30m</th><th>Gate</th></tr></thead><tbody>' +
+        '<table><thead><tr><th>Pool</th><th>Venue</th><th>Strategy</th><th>Edge after costs</th><th>Fee 30m</th><th>Gate</th></tr></thead><tbody>' +
         hist.map(c => '<tr><td>' + esc(c.poolName) + '</td><td>' + esc(c.venue) +
-        '</td><td>' + esc(c.side || '') +
+        '</td><td>' + esc(c.strategy || c.side || '') +
         '</td><td>$' + fmt(c.edgeUsd, 3) + '</td><td>$' + fmt(c.fee30m, 0) +
         '</td><td>' + (c.metThreshold ? badge('PASS','ok') : badge('SKIP','warn')) + '</td></tr>').join('') +
         '</tbody></table>'
@@ -265,6 +310,28 @@ function dashboardHtml(): string {
     async function pauseBot() { await api('/api/pause', 'POST'); await refresh(); }
     async function resumeBot() { await api('/api/resume', 'POST'); await refresh(); }
     async function scanNow() { await api('/api/scan', 'POST'); await refresh(); }
+    document.getElementById('armForm').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const input = document.getElementById('walletKey');
+      const secret = input.value;
+      input.value = '';
+      const msg = document.getElementById('armMsg');
+      msg.textContent = 'Arming…';
+      try {
+        const res = await fetch('/api/wallet', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ privateKey: secret }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Key was rejected');
+        msg.textContent = 'Armed ' + data.publicKey;
+        await refresh();
+      } catch (err) {
+        msg.textContent = err.message || 'Key was rejected';
+      }
+    });
 
     refresh().catch((err) => { document.getElementById('errorText').textContent = err.message; document.getElementById('errorBox').style.display = 'block'; });
     setInterval(() => refresh().catch(() => {}), 4000);
