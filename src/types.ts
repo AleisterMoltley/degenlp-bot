@@ -64,6 +64,7 @@ export interface ActivePosition {
   solPrice: number;
   scanMisses?: number;
   exitReason?: string;
+  exitedAt?: number;
 }
 
 export interface Book {

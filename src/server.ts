@@ -101,7 +101,6 @@ function dashboardHtml(): string {
       --accent: #3dff9a;
       --warn: #ffcc66;
       --danger: #ff6b6b;
-      --blue: #5eb8ff;
     }
     * { box-sizing: border-box; }
     body {
@@ -112,17 +111,17 @@ function dashboardHtml(): string {
       min-height: 100vh;
     }
     .wrap { max-width: 1100px; margin: 0 auto; padding: 24px; }
-    h1 { margin: 0 0 4px; font-size: 1.6rem; letter-spacing: -0.02em; }
-    .sub { color: var(--muted); margin-bottom: 20px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+    h1 { margin: 0; font-size: 1.45rem; letter-spacing: -0.03em; }
+    .sub { color: var(--muted); margin: 6px 0 0; max-width: 62ch; }
+    .head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+    .pills { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .card {
       background: var(--panel);
       border: 1px solid var(--border);
       border-radius: 14px;
       padding: 16px;
     }
-    .label { color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; }
-    .value { font-size: 1.35rem; font-weight: 700; margin-top: 6px; }
+    .label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.06em; }
     .badge {
       display: inline-block;
       padding: 4px 10px;
@@ -134,8 +133,8 @@ function dashboardHtml(): string {
     .ok { background: #153a2a; color: var(--accent); }
     .warn { background: #3a3115; color: var(--warn); }
     .danger { background: #3a1515; color: var(--danger); }
-    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0; }
-    button {
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0; }
+    button, summary {
       background: #13241d;
       color: var(--text);
       border: 1px solid var(--border);
@@ -146,29 +145,60 @@ function dashboardHtml(): string {
     }
     button.primary { background: #154a33; border-color: #2f7d57; color: var(--accent); }
     button:hover { filter: brightness(1.08); }
-    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid var(--border); }
-    th { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    th { color: var(--muted); font-size: 0.72rem; text-transform: uppercase; }
+    .scroll { overflow-x: auto; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.82rem; }
-    .section { margin-top: 18px; }
+    .section { margin-top: 14px; }
     .err { color: var(--danger); white-space: pre-wrap; }
-    @media (max-width: 700px) { .wrap { padding: 14px; } }
+    .hero { display: grid; grid-template-columns: 1.3fr 0.7fr; gap: 12px; }
+    .pnl { font-size: 2.6rem; font-weight: 760; letter-spacing: -0.04em; font-variant-numeric: tabular-nums; line-height: 1.05; margin-top: 8px; }
+    .pos { color: var(--accent); }
+    .neg { color: var(--danger); }
+    .split { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px; }
+    .split .num { font-size: 1.05rem; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+    .parts { margin-top: 12px; color: var(--muted); }
+    .now-line { display: flex; gap: 10px; align-items: flex-start; margin-top: 8px; }
+    .dot { width: 9px; height: 9px; border-radius: 99px; margin-top: 6px; flex: none; background: var(--muted); }
+    .dot.live { background: var(--accent); box-shadow: 0 0 0 0 rgba(61,255,154,.65); animation: pulse 1.6s infinite; }
+    .dot.stale { background: var(--warn); }
+    .dot.dead { background: var(--danger); }
+    @keyframes pulse { 70% { box-shadow: 0 0 0 8px rgba(61,255,154,0); } }
+    .decision { font-size: 1.15rem; font-weight: 750; letter-spacing: 0.04em; }
+    .reason { margin-top: 4px; }
+    .meta { margin-top: 8px; color: var(--muted); }
+    .cols { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 12px; }
+    details.card > summary { list-style: none; display: inline-block; }
+    details.card > summary::-webkit-details-marker { display: none; }
+    .flash { animation: flash 0.6s ease; }
+    @keyframes flash { from { filter: brightness(1.8); } to { filter: none; } }
+    @media (max-width: 800px) {
+      .wrap { padding: 14px; }
+      .hero, .cols, .split { grid-template-columns: 1fr; }
+      .pnl { font-size: 2.1rem; }
+    }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1>Degen LP</h1>
-    <p class="sub">Growth desk. Each seat is capped, a falling tape blocks a new entry, and a fast tape scratches a bid early. Two risk cuts pause new entries. It keeps compounding with no SOL cap. Arming a key on a live desk trades for real. The path is not a promise.</p>
+    <div class="head">
+      <div>
+        <h1>Degen LP</h1>
+        <p class="sub">Live book. The number is realized closes plus the open seats, and it moves on every scan. Arming a key trades for real. The path is not a promise.</p>
+      </div>
+      <div class="pills" id="pills"></div>
+    </div>
 
-    <div class="section card" id="armCard">
-      <div class="label">Wallet</div>
-      <p id="walletLine" class="mono" style="color:var(--muted);margin-top:8px"></p>
+    <details class="section card" id="armCard">
+      <summary>Wallet</summary>
+      <p id="walletLine" class="mono" style="color:var(--muted);margin-top:10px"></p>
       <form id="armForm" autocomplete="off" style="display:none;gap:8px;flex-wrap:wrap;margin-top:10px">
-        <input id="walletKey" type="password" autocomplete="off" spellcheck="false" placeholder="Private key (base58 or byte array)" style="flex:1;min-width:240px;background:#0b1210;color:var(--text);border:1px solid var(--border);border-radius:10px;padding:10px 12px" />
+        <input id="walletKey" type="password" autocomplete="off" spellcheck="false" placeholder="Private key (base58 or byte array)" style="flex:1;min-width:220px;background:#0b1210;color:var(--text);border:1px solid var(--border);border-radius:10px;padding:10px 12px" />
         <button class="primary" type="submit">Arm and trade</button>
       </form>
       <div id="armMsg" class="mono" style="margin-top:8px"></div>
-    </div>
+    </details>
 
     <div class="actions">
       <button class="primary" onclick="scanNow()">Scan now</button>
@@ -177,25 +207,48 @@ function dashboardHtml(): string {
       <button onclick="refresh()">Refresh</button>
     </div>
 
-    <div class="grid" id="stats"></div>
+    <div class="hero">
+      <div class="card">
+        <div class="label">Live PnL</div>
+        <div class="pnl" id="livePnl">—</div>
+        <div class="parts mono" id="pnlParts"></div>
+        <div class="split">
+          <div><div class="label">Realized</div><div class="num" id="realized">—</div></div>
+          <div><div class="label">Open</div><div class="num" id="openPnl">—</div></div>
+          <div><div class="label">Equity</div><div class="num" id="equity">—</div></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="label">Now</div>
+        <div class="now-line">
+          <div class="dot" id="liveDot"></div>
+          <div style="min-width:0">
+            <div class="decision" id="decision">—</div>
+            <div class="reason" id="reason"></div>
+            <div class="meta mono" id="nowMeta"></div>
+          </div>
+        </div>
+      </div>
+    </div>
 
-    <div class="section card">
-      <div class="label">Last scan</div>
-      <div id="lastScan" style="margin-top:10px"></div>
+    <div class="cols">
+      <div class="section card">
+        <div class="label">Open seats</div>
+        <div class="scroll" id="position" style="margin-top:10px"></div>
+      </div>
+      <div class="section card">
+        <div class="label">Recent closes</div>
+        <div class="scroll" id="closes" style="margin-top:10px"></div>
+      </div>
     </div>
 
     <div class="section card">
-      <div class="label">Seats</div>
-      <div id="position" style="margin-top:10px"></div>
+      <div class="label">Gate</div>
+      <div class="scroll" id="candidates" style="margin-top:10px"></div>
     </div>
 
     <div class="section card">
-      <div class="label">Scalp gate</div>
-      <div id="candidates" style="margin-top:10px"></div>
-    </div>
-
-    <div class="section card">
-      <div class="label">Scan history</div>
+      <div class="label">Decisions</div>
       <div id="history" style="margin-top:10px"></div>
     </div>
 
@@ -206,97 +259,158 @@ function dashboardHtml(): string {
   </div>
 
   <script>
+    var lastLive = null;
     function seatsOf(s) {
       if (Array.isArray(s.seats)) return s.seats;
       return s.activePosition ? [s.activePosition] : [];
     }
     function openNet(s) {
-      return seatsOf(s).reduce((sum, p) => sum + (p.feesAccruedUsd||0) - (p.ilUsd||0) - (p.costsUsd||0), 0);
+      return seatsOf(s).reduce(function (sum, p) {
+        return sum + (p.feesAccruedUsd || 0) - (p.ilUsd || 0) - (p.costsUsd || 0);
+      }, 0);
     }
     function badge(text, cls) { return '<span class="badge ' + cls + '">' + text + '</span>'; }
-    function fmt(n, d=3) { return Number(n||0).toFixed(d); }
-    function esc(s) { return String(s??'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+    function fmt(n, d) { return Number(n || 0).toFixed(d == null ? 3 : d); }
+    function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]; }); }
+    function moneyText(n, d) {
+      var v = Number(n || 0);
+      var sign = v < -0.0000001 ? '-' : v > 0.0000001 ? '+' : '';
+      return sign + '$' + Math.abs(v).toFixed(d);
+    }
+    function signed(n, d) {
+      var v = Number(n || 0);
+      var cls = v > 0.0000001 ? 'pos' : v < -0.0000001 ? 'neg' : '';
+      return '<span class="' + cls + '">' + moneyText(v, d) + '</span>';
+    }
+    function ago(ms) {
+      if (!ms) return '—';
+      var s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+      if (s < 60) return s + 's ago';
+      var m = Math.floor(s / 60);
+      if (m < 60) return m + 'm ago';
+      return Math.floor(m / 60) + 'h ago';
+    }
+    function held(ms) {
+      var s = Math.max(0, Math.floor(ms / 1000));
+      if (s < 60) return s + 's';
+      var m = Math.floor(s / 60);
+      if (m < 60) return m + 'm';
+      return Math.floor(m / 60) + 'h ' + (m % 60) + 'm';
+    }
+    function move(p) {
+      if (!(p.entryPrice > 0) || !(p.lastPrice > 0)) return '—';
+      var pct = (p.lastPrice / p.entryPrice - 1) * 100;
+      var cls = pct > 0.0001 ? 'pos' : pct < -0.0001 ? 'neg' : '';
+      return '<span class="' + cls + '">' + (pct > 0 ? '+' : '') + pct.toFixed(2) + '%</span>';
+    }
 
-    async function api(path, method='GET') {
-      const res = await fetch(path, { method, credentials: 'same-origin' });
+    async function api(path, method) {
+      var res = await fetch(path, { method: method || 'GET', credentials: 'same-origin' });
       if (!res.ok) throw new Error(await res.text());
       return res.json();
     }
 
     function renderStatus(s) {
-      const mode = s.config.dryRun ? badge('DRY RUN', 'warn') : badge('LIVE', 'danger');
-      const run = s.paused ? badge('PAUSED', 'warn') : badge('RUNNING', 'ok');
-      const wallet = s.config.walletConfigured ? badge('ARMED', 'ok') : (s.config.dryRun ? badge('PAPER', 'warn') : badge('NEEDS KEY', 'danger'));
-      const walletLine = document.getElementById('walletLine');
-      const armForm = document.getElementById('armForm');
+      var mode = s.config.dryRun ? badge('DRY RUN', 'warn') : badge('LIVE', 'danger');
+      var run = s.paused ? badge('PAUSED', 'warn') : badge('RUNNING', 'ok');
+      var wallet = s.config.walletConfigured ? badge('ARMED', 'ok') : (s.config.dryRun ? badge('PAPER', 'warn') : badge('NEEDS KEY', 'danger'));
+      document.getElementById('pills').innerHTML = run + mode + wallet;
+      var walletLine = document.getElementById('walletLine');
+      var armForm = document.getElementById('armForm');
+      var armCard = document.getElementById('armCard');
       if (s.config.dryRun) {
         walletLine.textContent = 'Paper desk. A key is not accepted here.';
         armForm.style.display = 'none';
       } else if (s.config.walletPublicKey) {
-        walletLine.textContent = 'Live. Signing as ' + s.config.walletPublicKey;
+        walletLine.textContent = 'Signing as ' + s.config.walletPublicKey;
         armForm.style.display = 'flex';
       } else {
-        walletLine.textContent = 'Live. Paste a key and the next scan trades.';
+        walletLine.textContent = 'Paste a key. The next scan trades.';
         armForm.style.display = 'flex';
+        if (!armCard.open) armCard.open = true;
       }
 
-      document.getElementById('stats').innerHTML = [
-        ['Status', run],
-        ['Mode', mode],
-        ['Wallet', wallet],
-        ['Uptime', Math.floor(s.uptimeSec/60) + 'm'],
-        ['Scans', String(s.scanCount)],
-        ['Scan', (s.scanMs || 0) + ' ms'],
-        ['Interval', (s.config.scanIntervalMs/1000) + 's'],
-        ['Pools', (s.poolCounts ? (s.poolCounts.dlmm + '/' + s.poolCounts.damm_v2 + '/' + s.poolCounts.damm_v1) : '—')],
-        ['Equity', s.growth ? fmt(s.growth.equitySol, 3) + ' SOL' : '—'],
-        ['Pace', s.growth ? fmt(s.growth.paceSol, 3) + ' SOL' : '—'],
-        ['Deploy', s.growth ? fmt(s.growth.deploySol, 3) + ' SOL' : (s.config.solDeploy + ' SOL')],
-        ['Seats', String(seatsOf(s).length)],
-        ['Realized', '$' + fmt(s.book?.realizedUsd, 4)],
-        ['Open', '$' + fmt(openNet(s), 4)],
-      ].map(([k,v]) => '<div class="card"><div class="label">' + k + '</div><div class="value">' + v + '</div></div>').join('');
+      var book = s.book || {};
+      var seats = seatsOf(s);
+      var open = openNet(s);
+      var realized = book.realizedUsd || 0;
+      var live = realized + open;
+      var fees = (book.feesUsd || 0) + seats.reduce(function (n, p) { return n + (p.feesAccruedUsd || 0); }, 0);
+      var il = (book.ilUsd || 0) + seats.reduce(function (n, p) { return n + (p.ilUsd || 0); }, 0);
+      var costs = (book.costsUsd || 0) + seats.reduce(function (n, p) { return n + (p.costsUsd || 0); }, 0);
+      var liveEl = document.getElementById('livePnl');
+      var liveText = moneyText(live, 4);
+      if (lastLive !== null && liveText !== lastLive) liveEl.classList.add('flash');
+      else liveEl.classList.remove('flash');
+      lastLive = liveText;
+      liveEl.textContent = liveText;
+      liveEl.classList.toggle('pos', live > 0.0000001);
+      liveEl.classList.toggle('neg', live < -0.0000001);
+      document.getElementById('pnlParts').innerHTML = 'Fees ' + signed(fees, 4) + ' · Divergence ' + signed(-il, 4) + ' · Costs ' + signed(-costs, 4);
+      document.getElementById('realized').innerHTML = signed(realized, 4);
+      document.getElementById('openPnl').innerHTML = signed(open, 4);
+      var equity = document.getElementById('equity');
+      if (s.growth) {
+        var delta = (s.growth.equitySol || 0) - (s.growth.startSol || 0);
+        equity.innerHTML = fmt(s.growth.equitySol, 3) + ' SOL <span class="' + (delta > 0.0000001 ? 'pos' : delta < -0.0000001 ? 'neg' : '') + '">(' + (delta > 0 ? '+' : '') + fmt(delta, 3) + ')</span>';
+      } else equity.textContent = '—';
 
-      const ls = s.lastScan;
-      document.getElementById('lastScan').innerHTML = ls ? (
-        '<div><strong>' + esc(ls.decision.toUpperCase()) + '</strong> · ' + esc(ls.poolName) + '</div>' +
-        '<div class="mono" style="margin-top:6px;color:var(--muted)">' +
-        esc(ls.venue || 'n/a') + ' · ' + esc(ls.reason || '') +
-        ' · edge $' + fmt(ls.opportunityScore, 3) + ' · fee/tvl ' + fmt(ls.feeToTvlRatio, 4)
-        '</div><div class="mono" style="margin-top:4px;color:var(--muted)">' + esc(s.lastScanAt||'') + '</div>'
-      ) : '<span style="color:var(--muted)">No scans yet</span>';
+      var ls = s.lastScan;
+      var scanMs = s.lastScanAt ? new Date(s.lastScanAt).getTime() : 0;
+      var age = scanMs ? Date.now() - scanMs : Infinity;
+      var dot = document.getElementById('liveDot');
+      dot.className = 'dot' + (s.paused || !s.loopRunning ? ' dead' : age < 12000 ? ' live' : ' stale');
+      document.getElementById('decision').textContent = ls ? String(ls.decision || 'wait').toUpperCase() : 'WAITING';
+      document.getElementById('reason').textContent = ls ? (ls.reason || ls.poolName || '') : 'No scan yet';
+      var pools = s.poolCounts ? (s.poolCounts.dlmm + ' dlmm / ' + s.poolCounts.damm_v2 + ' damm2 / ' + s.poolCounts.damm_v1 + ' damm1') : 'pools —';
+      var seated = seats.reduce(function (n, p) { return n + (p.solDeployed || 0); }, 0);
+      var budget = s.growth ? s.growth.deploySol : s.config.solDeploy;
+      var pace = s.growth ? ' · pace line ' + fmt(s.growth.paceSol, 2) + ' SOL' : '';
+      document.getElementById('nowMeta').textContent = ago(scanMs) + ' · ' + fmt(seated, 3) + ' / ' + fmt(budget, 3) + ' SOL in seats · ' + pools + ' · scan ' + (s.scanMs || 0) + 'ms' + pace;
 
-      const seats = seatsOf(s);
       document.getElementById('position').innerHTML = seats.length ? (
-        '<table><thead><tr><th>Strategy</th><th>Pool</th><th>Size</th><th>Fees</th><th>Divergence</th><th>Net</th></tr></thead><tbody>' +
-        seats.map(p => '<tr><td>' + esc(p.strategy || 'core') + ' · ' + esc(p.side) +
-          '</td><td>' + esc(p.poolName) +
-          '</td><td>' + fmt(p.solDeployed, 3) + ' SOL</td><td>$' + fmt(p.feesAccruedUsd, 4) +
-          '</td><td>$' + fmt(p.ilUsd, 4) +
-          '</td><td>$' + fmt((p.feesAccruedUsd||0) - (p.ilUsd||0) - (p.costsUsd||0), 4) +
-          '</td></tr>').join('') +
-        '</tbody></table>'
+        '<table><thead><tr><th>Seat</th><th>Pool</th><th>Size</th><th>Move</th><th>Held</th><th>Fees</th><th>IL</th><th>Costs</th><th>Net</th></tr></thead><tbody>' +
+        seats.map(function (p) {
+          return '<tr><td>' + esc(p.strategy || 'core') + ' · ' + esc(p.side) +
+            '</td><td>' + esc(p.poolName) +
+            '</td><td>' + fmt(p.solDeployed, 3) + '</td><td>' + move(p) +
+            '</td><td>' + held(Date.now() - (p.enteredAt || Date.now())) +
+            '</td><td>' + signed(p.feesAccruedUsd, 4) +
+            '</td><td>' + signed(-(p.ilUsd || 0), 4) +
+            '</td><td>' + signed(-(p.costsUsd || 0), 4) +
+            '</td><td>' + signed((p.feesAccruedUsd || 0) - (p.ilUsd || 0) - (p.costsUsd || 0), 4) +
+            '</td></tr>';
+        }).join('') + '</tbody></table>'
       ) : '<span style="color:var(--muted)">No open seats. A red quote stays in cash.</span>';
 
-      const hist = s.scanHistory?.[0]?.topCandidates || [];
+      var closes = s.recentCloses || [];
+      document.getElementById('closes').innerHTML = closes.length ? (
+        '<table><thead><tr><th>When</th><th>Pool</th><th>Why</th><th>Net</th></tr></thead><tbody>' +
+        closes.map(function (c) {
+          return '<tr><td>' + ago(c.at) + '</td><td>' + esc(c.strategy) + ' ' + esc(c.poolName) +
+            '<div class="mono" style="color:var(--muted)">' + fmt(c.solDeployed, 3) + ' SOL</div></td><td>' +
+            esc(c.reason || 'closed') + '</td><td>' + signed(c.netUsd, 4) + '</td></tr>';
+        }).join('') + '</tbody></table>'
+      ) : '<span style="color:var(--muted)">No closes yet. The live number stays at zero until a seat banks or cuts.</span>';
+
+      var hist = (s.scanHistory && s.scanHistory[0] && s.scanHistory[0].topCandidates) || [];
       document.getElementById('candidates').innerHTML = hist.length ? (
-        '<table><thead><tr><th>Pool</th><th>Venue</th><th>Strategy</th><th>Edge after costs</th><th>Fee 30m</th><th>Gate</th></tr></thead><tbody>' +
-        hist.map(c => '<tr><td>' + esc(c.poolName) + '</td><td>' + esc(c.venue) +
-        '</td><td>' + esc(c.strategy || c.side || '') +
-        '</td><td>$' + fmt(c.edgeUsd, 3) + '</td><td>$' + fmt(c.fee30m, 0) +
-        '</td><td>' + (c.metThreshold ? badge('PASS','ok') : badge('SKIP','warn')) + '</td></tr>').join('') +
-        '</tbody></table>'
-      ) : '<span style="color:var(--muted)">—</span>';
+        '<table><thead><tr><th>Pool</th><th>Strategy</th><th>Edge</th><th>Fee 30m</th><th>Gate</th></tr></thead><tbody>' +
+        hist.map(function (c) {
+          return '<tr><td>' + esc(c.poolName) + '</td><td>' + esc(c.strategy || c.side || '') +
+            '</td><td>' + signed(c.edgeUsd, 3) + '</td><td>$' + fmt(c.fee30m, 0) +
+            '</td><td>' + (c.metThreshold ? badge('PASS', 'ok') : badge('SKIP', 'warn')) + '</td></tr>';
+        }).join('') + '</tbody></table>'
+      ) : '<span style="color:var(--muted)">Waiting for the first scan.</span>';
 
-      document.getElementById('history').innerHTML = (s.scanHistory||[]).slice(0,12).map(h =>
-        '<div style="padding:8px 0;border-bottom:1px solid var(--border)">' +
-        '<span class="mono" style="color:var(--muted)">' + esc(h.at) + '</span> · ' +
-        '<strong>' + esc(h.check.decision) + '</strong> · ' + esc(h.check.poolName) +
-        ' · ' + esc(h.check.reason || '') +
-        '</div>'
-      ).join('') || '<span style="color:var(--muted)">—</span>';
+      document.getElementById('history').innerHTML = (s.scanHistory || []).slice(0, 8).map(function (h) {
+        return '<div style="padding:7px 0;border-bottom:1px solid var(--border)">' +
+          '<span class="mono" style="color:var(--muted)">' + ago(new Date(h.at).getTime()) + '</span> · ' +
+          '<strong>' + esc(h.check.decision) + '</strong> · ' + esc(h.check.reason || h.check.poolName || '') +
+          '</div>';
+      }).join('') || '<span style="color:var(--muted)">No decisions yet.</span>';
 
-      const errBox = document.getElementById('errorBox');
+      var errBox = document.getElementById('errorBox');
       if (s.lastError) {
         errBox.style.display = 'block';
         document.getElementById('errorText').textContent = s.lastError;
@@ -304,27 +418,26 @@ function dashboardHtml(): string {
     }
 
     async function refresh() {
-      const s = await api('/api/status');
-      renderStatus(s);
+      renderStatus(await api('/api/status'));
     }
     async function pauseBot() { await api('/api/pause', 'POST'); await refresh(); }
     async function resumeBot() { await api('/api/resume', 'POST'); await refresh(); }
     async function scanNow() { await api('/api/scan', 'POST'); await refresh(); }
-    document.getElementById('armForm').addEventListener('submit', async (ev) => {
+    document.getElementById('armForm').addEventListener('submit', async function (ev) {
       ev.preventDefault();
-      const input = document.getElementById('walletKey');
-      const secret = input.value;
+      var input = document.getElementById('walletKey');
+      var secret = input.value;
       input.value = '';
-      const msg = document.getElementById('armMsg');
+      var msg = document.getElementById('armMsg');
       msg.textContent = 'Arming…';
       try {
-        const res = await fetch('/api/wallet', {
+        var res = await fetch('/api/wallet', {
           method: 'POST',
           credentials: 'same-origin',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ privateKey: secret }),
         });
-        const data = await res.json();
+        var data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Key was rejected');
         msg.textContent = 'Armed ' + data.publicKey;
         await refresh();
@@ -333,8 +446,11 @@ function dashboardHtml(): string {
       }
     });
 
-    refresh().catch((err) => { document.getElementById('errorText').textContent = err.message; document.getElementById('errorBox').style.display = 'block'; });
-    setInterval(() => refresh().catch(() => {}), 4000);
+    refresh().catch(function (err) {
+      document.getElementById('errorText').textContent = err.message;
+      document.getElementById('errorBox').style.display = 'block';
+    });
+    setInterval(function () { refresh().catch(function () {}); }, 2000);
   </script>
 </body>
 </html>`;

@@ -40,6 +40,18 @@ export interface BotSnapshot {
   activePosition: ActivePosition | null;
   seats: ActivePosition[];
   closedCount: number;
+  recentCloses: Array<{
+    poolName: string;
+    strategy: string;
+    side: string;
+    solDeployed: number;
+    netUsd: number;
+    feesUsd: number;
+    ilUsd: number;
+    costsUsd: number;
+    reason: string;
+    at: number;
+  }>;
   book: BotState["book"];
   growth: {
     startSol: number;
@@ -481,6 +493,7 @@ export class DegenLpBot {
 
     active.status = "closed";
     active.exitReason = reason;
+    active.exitedAt = Date.now();
     active.entrySignature = sig;
     this.state.closed.unshift(active);
     if (this.state.closed.length > 200) this.state.closed.length = 200;
@@ -552,6 +565,21 @@ export class DegenLpBot {
       activePosition: this.state.active,
       seats: this.state.seats,
       closedCount: this.state.closed.length,
+      recentCloses: [...this.state.closed]
+        .sort((a, b) => (b.exitedAt ?? b.lastMarkAt ?? 0) - (a.exitedAt ?? a.lastMarkAt ?? 0))
+        .slice(0, 12)
+        .map((seat) => ({
+          poolName: seat.poolName,
+          strategy: seat.strategy ?? "core",
+          side: seat.side,
+          solDeployed: seat.solDeployed,
+          netUsd: seat.feesAccruedUsd - seat.ilUsd - seat.costsUsd,
+          feesUsd: seat.feesAccruedUsd,
+          ilUsd: seat.ilUsd,
+          costsUsd: seat.costsUsd,
+          reason: seat.exitReason ?? "",
+          at: seat.exitedAt ?? seat.lastMarkAt ?? 0,
+        })),
       book: this.state.book,
       growth: this.growthView(),
       scanMs: this.lastScanMs,
@@ -700,6 +728,8 @@ export class DegenLpBot {
     for (const active of gone) {
       console.log(`[reconcile] ${active.poolName} gone on-chain, clearing state`);
       active.status = "closed";
+      active.exitReason = active.exitReason || "Position not found on-chain - already closed";
+      active.exitedAt = active.exitedAt || Date.now();
       this.state.closed.push(active);
       this.state.seats = this.state.seats.filter((seat) => seat.id !== active.id);
       await this.telemetryExit(active, "Position not found on-chain - already closed", `reconciliation_${active.positionAddress}_${Date.now()}`);
