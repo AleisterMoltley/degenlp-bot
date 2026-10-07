@@ -371,10 +371,11 @@ function dashboardHtml(): string {
       document.getElementById('decision').textContent = ls ? String(ls.decision || 'wait').toUpperCase() : 'WAITING';
       document.getElementById('reason').textContent = ls ? (ls.reason || ls.poolName || '') : 'No scan yet';
       var pools = s.poolCounts ? (s.poolCounts.dlmm + ' dlmm / ' + s.poolCounts.damm_v2 + ' damm2 / ' + s.poolCounts.damm_v1 + ' damm1') : 'pools —';
+      var fill = s.config.dryRun ? '' : ' · fill ' + (s.config.fillPollMs || 0) + 'ms';
       var seated = seats.reduce(function (n, p) { return n + (p.solDeployed || 0); }, 0);
       var budget = s.growth ? s.growth.deploySol : s.config.solDeploy;
       var pace = s.growth ? ' · pace line ' + fmt(s.growth.paceSol, 2) + ' SOL' : '';
-      document.getElementById('nowMeta').textContent = ago(scanMs) + ' · ' + fmt(seated, 3) + ' / ' + fmt(budget, 3) + ' SOL in seats · ' + pools + ' · scan ' + (s.scanMs || 0) + 'ms' + pace;
+      document.getElementById('nowMeta').textContent = ago(scanMs) + ' · ' + fmt(seated, 3) + ' / ' + fmt(budget, 3) + ' SOL in seats · ' + pools + ' · scan ' + (s.scanMs || 0) + 'ms' + fill + pace;
 
       document.getElementById('position').innerHTML = seats.length ? (
         '<table><thead><tr><th>Seat</th><th>Pool</th><th>Size</th><th>Move</th><th>Held</th><th>Fees</th><th>IL</th><th>Costs</th><th>Net</th></tr></thead><tbody>' +

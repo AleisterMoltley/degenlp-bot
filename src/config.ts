@@ -18,6 +18,8 @@ export const config = {
   walletPrivateKey: process.env.WALLET_PRIVATE_KEY ?? "",
   dryRun: bool("DRY_RUN", true),
   scanIntervalMs: num("SCAN_INTERVAL_MS", 4_000),
+  /** Backup read of an open pool. The websocket is the slot signal. */
+  fillPollMs: num("FILL_POLL_MS", 400),
   fleetSlots: num("FLEET_SLOTS", 8),
   fleetHoldMin: num("FLEET_HOLD_MIN", 4),
   fleetBankUsd: num("FLEET_BANK_USD", 0.02),

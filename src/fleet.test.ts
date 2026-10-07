@@ -33,6 +33,12 @@ function pool(over: Partial<PoolCandidate> = {}): PoolCandidate {
     chopCrossings: 4,
     chopNetBins: 0.5,
     binSolUsd: 100_000,
+    baseFeePct: 0.08,
+    binTapeSamples: 12,
+    binTapeSpanMs: 60_000,
+    binTapeCrossings: 4,
+    binTapeNet: 0.4,
+    binTapeMaxStep: 1,
     ...over,
   };
 }
@@ -277,6 +283,47 @@ test("a one-bin snipe stays inside the seat cap", () => {
   assert.ok(big.solDeploy <= 0.72 * 0.22 + 1e-6);
   const sol = plan.opens.reduce((sum, row) => sum + row.solDeploy, 0);
   assert.ok(sol <= 0.72 + 1e-9);
+});
+
+test("a thin base fee does not open", () => {
+  const thin = paying({
+    baseFeePct: 0.02,
+    fee30mUsd: 80_000,
+    fee1hUsd: 160_000,
+  });
+  const plan = planFleet({ pools: [thin], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.equal(plan.opens.length, 0);
+  assert.match(plan.summary, /fee rate too thin/);
+  assert.equal(plan.preview[0]?.strategy, "geometry");
+});
+
+test("a bin that jumps is not a seat", () => {
+  const jumped = paying({ binTapeMaxStep: 3, binTapeNet: 3, fee30mUsd: 80_000, fee1hUsd: 160_000 });
+  const plan = planFleet({ pools: [jumped], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.equal(plan.opens.length, 0);
+  assert.match(plan.summary, /no travel/);
+});
+
+test("a flat fee rate outranks a larger traveling print", () => {
+  const traveler = paying({
+    poolAddress: "travel",
+    poolName: "TRAVEL-SOL",
+    tokenSymbol: "TRAVEL",
+    fee30mUsd: 80_000,
+    fee1hUsd: 160_000,
+    baseFeePct: 0.06,
+    binTapeNet: 1,
+  });
+  const flat = paying({
+    poolAddress: "flat",
+    poolName: "FLAT-SOL",
+    tokenSymbol: "FLAT",
+    baseFeePct: 0.12,
+    binTapeNet: 0.2,
+  });
+  const plan = planFleet({ pools: [traveler, flat], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.ok(plan.opens.length >= 1, plan.summary);
+  assert.equal(plan.opens[0].pool.poolAddress, "flat");
 });
 
 test("a one-way print is not a seat", () => {

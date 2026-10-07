@@ -10,6 +10,7 @@ import {
 } from "@solana/web3.js";
 import BN from "bn.js";
 import { config } from "./config.js";
+import { activeIdFromPool } from "./fillwatch.js";
 import { buildJupiterSwap, sellSlices, SOL_MINT } from "./jupiter.js";
 import { buildPosition } from "./position.js";
 import type { ActivePosition, OpportunityCheck, PoolCandidate } from "./types.js";
@@ -58,6 +59,29 @@ export class DlmmExecutor {
   async positionExists(positionAddress: string): Promise<boolean> {
     const info = await this.connection.getAccountInfo(new PublicKey(positionAddress));
     return info !== null;
+  }
+
+  /** Active bin from the pair account. Processed, so it is the latest slot. */
+  async poolActiveId(poolAddress: string): Promise<number | null> {
+    const info = await this.connection.getAccountInfo(new PublicKey(poolAddress), "processed");
+    if (!info) return null;
+    return activeIdFromPool(info.data);
+  }
+
+  /** Fires when the pair account changes. The id is read from the notification itself. */
+  watchPool(poolAddress: string, onActiveId: (activeId: number) => void): () => void {
+    const id = this.connection.onAccountChange(
+      new PublicKey(poolAddress),
+      (account) => {
+        const activeId = activeIdFromPool(account.data);
+        if (activeId == null) return;
+        onActiveId(activeId);
+      },
+      "processed",
+    );
+    return () => {
+      void this.connection.removeAccountChangeListener(id);
+    };
   }
 
   /** SOL in the active bin, in SOL. The caller prices it. */

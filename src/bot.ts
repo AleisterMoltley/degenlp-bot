@@ -2,6 +2,8 @@ import { buildCandidates, fetchOriginalOpportunityChecks, fetchTopPumpTokens } f
 import { config } from "./config.js";
 import { bankableUsd } from "./edge.js";
 import { chopFromPrices } from "./chop.js";
+import { bidTouched } from "./fillwatch.js";
+import { binTapeFromIds, feeRateClears, mintShouldSleep, priceBinId } from "./travel.js";
 import { deploySolFor, equitySol, paceSol } from "./growth.js";
 import { DlmmExecutor, enterPositionDryRun } from "./executor.js";
 import { loadWalletKeypair, saveWalletSecret } from "./wallet.js";
@@ -71,6 +73,7 @@ export interface BotSnapshot {
     mirrorOriginal: boolean;
     solDeploy: number;
     scanIntervalMs: number;
+    fillPollMs: number;
     proofnetworkTelemetry: boolean;
     proofnetworkContract: string;
     walletConfigured: boolean;
@@ -106,6 +109,12 @@ export class DegenLpBot {
   private sweepHold = new Map<string, number>();
   private mintSleep = new Map<string, number>();
   private binSolCache = new Map<string, { at: number; sol: number }>();
+  private binTapes = new Map<string, { at: number; id: number }[]>();
+  private lastActiveId = new Map<string, number>();
+  private poolWatch = new Map<string, () => void>();
+  private exitFlight = new Map<string, Promise<void>>();
+  private fillTimer: ReturnType<typeof setInterval> | null = null;
+  private fillPollFlight: Promise<void> | null = null;
 
   constructor() {
     this.state = loadState();
@@ -168,6 +177,7 @@ export class DegenLpBot {
     this.notePrices(candidates, now);
     this.attachChop(tradable);
     await this.attachBinDepth(tradable);
+    const travelWatched = await this.attachBinTravel(tradable, now);
     await this.noteFills();
     const plan = planFleet({
       pools: tradable,
@@ -195,7 +205,7 @@ export class DegenLpBot {
     const check = this.fleetCheck(plan, now);
 
     console.log(
-      `[scan] ${check.decision} seats=${this.state.seats.length} deploy=${this.deploySol.toFixed(3)} equity=${equity.toFixed(3)} ${plan.summary} ${this.lastScanMs}ms pools=${candidates.length} dlmm=${this.poolCounts.dlmm} damm2=${this.poolCounts.damm_v2} damm1=${this.poolCounts.damm_v1}`,
+      `[scan] ${check.decision} seats=${this.state.seats.length} deploy=${this.deploySol.toFixed(3)} equity=${equity.toFixed(3)} ${plan.summary} ${this.lastScanMs}ms pools=${candidates.length} dlmm=${this.poolCounts.dlmm} damm2=${this.poolCounts.damm_v2} damm1=${this.poolCounts.damm_v1} travel=${travelWatched}`,
     );
 
     await this.applyFleet(plan);
@@ -343,8 +353,14 @@ export class DegenLpBot {
     }
     const now = Date.now();
     const ranked = pools
-      .filter((pool) => pool.venue === "dlmm" && (pool.chopCrossings ?? 0) >= 2 && (pool.chopSamples ?? 0) >= 4)
-      .sort((a, b) => b.fee30mUsd - a.fee30mUsd)
+      .filter(
+        (pool) =>
+          pool.venue === "dlmm" &&
+          (pool.chopCrossings ?? 0) >= 2 &&
+          (pool.chopSamples ?? 0) >= 4 &&
+          feeRateClears(pool.baseFeePct ?? 0, pool.binStep ?? 80, this.unwindBps()),
+      )
+      .sort((a, b) => (b.baseFeePct ?? 0) - (a.baseFeePct ?? 0))
       .slice(0, 4);
     await Promise.all(
       ranked.map(async (pool) => {
@@ -363,6 +379,71 @@ export class DegenLpBot {
         }
       }),
     );
+  }
+
+  /** Active-bin steps on pools whose base fee can pay the unwind. Missing ids stay closed. */
+  private async attachBinTravel(pools: PoolCandidate[], now: number): Promise<number> {
+    const keepAfter = now - 3 * 60_000;
+    const unwindBps = this.unwindBps();
+    const shortlist = pools
+      .filter((pool) => pool.venue === "dlmm" && feeRateClears(pool.baseFeePct ?? 0, pool.binStep ?? 80, unwindBps))
+      .sort((a, b) => (b.baseFeePct ?? 0) - (a.baseFeePct ?? 0))
+      .slice(0, 8);
+    const ids = new Map<string, number>();
+    if (this.executor) {
+      await Promise.all(
+        shortlist.map(async (pool) => {
+          try {
+            const id = await this.executor!.poolActiveId(pool.poolAddress);
+            if (id == null || !Number.isInteger(id)) return;
+            ids.set(pool.poolAddress, id);
+          } catch {
+            console.error("[travel] active bin read failed");
+          }
+        }),
+      );
+    } else if (config.dryRun) {
+      for (const pool of shortlist) {
+        const id = priceBinId(pool.priceUsd, pool.binStep ?? 0);
+        if (id == null) continue;
+        ids.set(pool.poolAddress, id);
+      }
+    }
+    for (const pool of shortlist) {
+      const id = ids.get(pool.poolAddress);
+      if (id == null) continue;
+      this.rememberBin(pool.poolAddress, now, id);
+      const read = binTapeFromIds(this.binTapes.get(pool.poolAddress) ?? [], now, config.fleetTapeMs);
+      pool.binTapeSamples = read.samples;
+      pool.binTapeSpanMs = read.spanMs;
+      pool.binTapeCrossings = read.crossings;
+      pool.binTapeNet = read.netBins;
+      pool.binTapeMaxStep = read.maxStep;
+    }
+    const seated = new Set(this.state.seats.map((seat) => seat.poolAddress));
+    for (const [key, rows] of this.binTapes) {
+      while (rows.length && rows[0].at < keepAfter) rows.shift();
+      if (!rows.length) this.binTapes.delete(key);
+    }
+    for (const key of this.lastActiveId.keys()) {
+      if (!this.binTapes.has(key) && !seated.has(key)) this.lastActiveId.delete(key);
+    }
+    return ids.size;
+  }
+
+  private unwindBps(): number {
+    return Math.max(config.swapBps, 300);
+  }
+
+  private rememberBin(poolAddress: string, at: number, id: number): void {
+    this.lastActiveId.set(poolAddress, id);
+    let rows = this.binTapes.get(poolAddress);
+    if (!rows) {
+      rows = [];
+      this.binTapes.set(poolAddress, rows);
+    }
+    rows.push({ at, id });
+    if (rows.length > 48) rows.splice(0, rows.length - 48);
   }
 
   private async noteFills(): Promise<void> {
@@ -557,9 +638,22 @@ export class DegenLpBot {
     }
   }
 
-  private async closeSeat(active: ActivePosition, reason: string, action: BotDecision) {
-    // The burst that paid a cent is still the burst. Sleep the mint on every close.
-    this.mintSleep.set(active.tokenMint, Date.now() + 3 * 60_000);
+  private closeSeat(active: ActivePosition, reason: string, action: BotDecision): Promise<void> {
+    const existing = this.exitFlight.get(active.id);
+    if (existing) return existing;
+    const flight = this.finishClose(active, reason, action).finally(() => {
+      this.exitFlight.delete(active.id);
+      this.syncWatches(this.state.seats.filter((seat) => seat.side === "bid" && seat.minBinId === seat.maxBinId));
+    });
+    this.exitFlight.set(active.id, flight);
+    return flight;
+  }
+
+  private async finishClose(active: ActivePosition, reason: string, action: BotDecision) {
+    // Sleep only after a run-through or a violent exit. A dust atom still inside the bin can be checked again.
+    if (mintShouldSleep(reason, this.lastActiveId.get(active.poolAddress), active.minBinId)) {
+      this.mintSleep.set(active.tokenMint, Date.now() + 3 * 60_000);
+    }
     let sig = "dry_run_exit";
     if (!config.dryRun && this.executor) {
       const exists = await this.executor.positionExists(active.positionAddress);
@@ -646,6 +740,89 @@ export class DegenLpBot {
     saveState(this.state);
     console.log(`[position] opened ${pos.id} ${pos.strategy} ${pos.venue} ${pos.side} ${pos.poolName} ${pos.solDeployed.toFixed(3)} SOL`);
     await this.telemetryEntry(pos);
+    void this.pollFills();
+  }
+
+  /** The catalog scan stays on its interval. An open bid is watched on the pair account. */
+  private armFillWatch(): void {
+    if (this.fillTimer || config.dryRun || !this.executor) return;
+    this.fillTimer = setInterval(() => {
+      void this.pollFills();
+    }, config.fillPollMs);
+    void this.pollFills();
+  }
+
+  private async pollFills(): Promise<void> {
+    if (!this.executor || config.dryRun) return;
+    const seats = this.state.seats.filter((seat) => seat.side === "bid" && seat.minBinId === seat.maxBinId);
+    if (!seats.length) {
+      this.dropWatches();
+      return;
+    }
+    if (this.fillPollFlight) return;
+    this.fillPollFlight = this.readOpenPools(seats).finally(() => {
+      this.fillPollFlight = null;
+    });
+    await this.fillPollFlight;
+  }
+
+  private async readOpenPools(seats: ActivePosition[]): Promise<void> {
+    this.syncWatches(seats);
+    const pools = [...new Set(seats.map((seat) => seat.poolAddress))];
+    await Promise.all(
+      pools.map(async (pool) => {
+        try {
+          const activeId = await this.executor!.poolActiveId(pool);
+          if (activeId == null) return;
+          await this.onActiveBin(pool, activeId);
+        } catch {
+          console.error("[fill] pool read failed");
+        }
+      }),
+    );
+  }
+
+  private syncWatches(seats: ActivePosition[]): void {
+    if (!this.executor) return;
+    const wanted = new Set(seats.map((seat) => seat.poolAddress));
+    for (const [pool, stop] of this.poolWatch) {
+      if (wanted.has(pool)) continue;
+      stop();
+      this.poolWatch.delete(pool);
+    }
+    for (const pool of wanted) {
+      if (this.poolWatch.has(pool)) continue;
+      try {
+        const stop = this.executor.watchPool(pool, (activeId) => {
+          void this.onActiveBin(pool, activeId);
+        });
+        this.poolWatch.set(pool, stop);
+        const name = seats.find((seat) => seat.poolAddress === pool)?.poolName ?? pool;
+        console.log(`[fill] watching ${name}`);
+      } catch {
+        console.error("[fill] watch failed");
+      }
+    }
+  }
+
+  private dropWatches(): void {
+    for (const stop of this.poolWatch.values()) stop();
+    this.poolWatch.clear();
+  }
+
+  private async onActiveBin(poolAddress: string, activeId: number): Promise<void> {
+    this.lastActiveId.set(poolAddress, activeId);
+    const hit = this.state.seats.filter(
+      (seat) =>
+        seat.poolAddress === poolAddress &&
+        seat.side === "bid" &&
+        seat.minBinId === seat.maxBinId &&
+        bidTouched(activeId, seat.maxBinId),
+    );
+    for (const seat of hit) {
+      console.log(`[fill] ${seat.poolName} bin ${seat.maxBinId} active ${activeId}`);
+      await this.closeSeat(seat, "first meme atom", "exit");
+    }
   }
 
   getSnapshot(): BotSnapshot {
@@ -685,6 +862,7 @@ export class DegenLpBot {
         mirrorOriginal: config.mirrorOriginal,
         solDeploy: this.deploySol,
         scanIntervalMs: config.scanIntervalMs,
+        fillPollMs: config.fillPollMs,
         proofnetworkTelemetry: config.proofnetworkTelemetry,
         proofnetworkContract: config.proofnetworkContract,
         walletConfigured: Boolean(this.executor),
@@ -701,6 +879,7 @@ export class DegenLpBot {
     this.lastError = null;
     this.announcedKey = true;
     this.kick = true;
+    this.armFillWatch();
     console.log(`[live] wallet armed ${this.walletPublicKey}`);
     return { publicKey: this.walletPublicKey };
   }
@@ -758,8 +937,9 @@ export class DegenLpBot {
     const growth = ensureGrowth(this.state);
     const equity = this.refreshDeploy();
     console.log(
-      `telemetry=${!!this.telemetry} bankroll=${growth.startSol} equity=${equity.toFixed(3)} deploy=${this.deploySol.toFixed(3)} every=${config.scanIntervalMs}ms`,
+      `telemetry=${!!this.telemetry} bankroll=${growth.startSol} equity=${equity.toFixed(3)} deploy=${this.deploySol.toFixed(3)} every=${config.scanIntervalMs}ms fill=${config.fillPollMs}ms`,
     );
+    this.armFillWatch();
 
     await this.sendStartupAlert();
     this.loopRunning = true;

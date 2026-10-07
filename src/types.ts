@@ -111,4 +111,10 @@ export interface PoolCandidate {
   chopNetBins?: number;
   /** USD value of SOL in the active bin. Missing means the depth was not read. */
   binSolUsd?: number;
+  /** Active-bin tape. Missing means the pool was not watched. */
+  binTapeSamples?: number;
+  binTapeSpanMs?: number;
+  binTapeCrossings?: number;
+  binTapeNet?: number;
+  binTapeMaxStep?: number;
 }

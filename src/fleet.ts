@@ -2,6 +2,7 @@ import { chopShapeOk, depthOk } from "./chop.js";
 import { config } from "./config.js";
 import { bankableUsd, trailGaveBack } from "./edge.js";
 import { halfWidthFromBins, markIlUsd } from "./pnl.js";
+import { feePerBin, feeRateClears, microChopOk } from "./travel.js";
 import { computeMetrics, planPosition, rankPools, type Metrics } from "./scorer.js";
 import type { ActivePosition, BotDecision, PoolCandidate } from "./types.js";
 
@@ -103,6 +104,8 @@ function isSkim(seat: ActivePosition): boolean {
 
 const SNIPE_BINS = 1;
 
+const UNWIND_BPS = Math.max(config.swapBps, 300);
+
 function chopBlocks(pool: PoolCandidate): boolean {
   if (pool.venue !== "dlmm") return false;
   const shape = chopShapeOk({
@@ -112,6 +115,26 @@ function chopBlocks(pool: PoolCandidate): boolean {
   });
   const depth = depthOk(pool.volume30mUsd / 30, pool.binSolUsd);
   return !shape || !depth;
+}
+
+function geometryBlocks(pool: PoolCandidate): boolean {
+  if (pool.venue !== "dlmm") return false;
+  return !feeRateClears(pool.baseFeePct ?? 0, pool.binStep ?? 80, UNWIND_BPS);
+}
+
+function travelBlocks(pool: PoolCandidate): boolean {
+  if (pool.venue !== "dlmm") return false;
+  return !microChopOk({
+    samples: pool.binTapeSamples ?? 0,
+    spanMs: pool.binTapeSpanMs ?? 0,
+    crossings: pool.binTapeCrossings ?? 0,
+    netBins: pool.binTapeNet ?? Number.POSITIVE_INFINITY,
+    maxStep: pool.binTapeMaxStep ?? Number.POSITIVE_INFINITY,
+  });
+}
+
+function entryBlocked(pool: PoolCandidate): boolean {
+  return geometryBlocks(pool) || travelBlocks(pool) || chopBlocks(pool);
 }
 
 function skimQuote(
@@ -126,7 +149,7 @@ function skimQuote(
   };
   const metrics = computeMetrics(copy, sol, true, {
     holdMin: config.fleetHoldMin,
-    fillFraction: skimFillFraction(pool.binStep, SNIPE_BINS, Math.max(config.swapBps, 300), dropOf(pool, moves)),
+    fillFraction: skimFillFraction(pool.binStep, SNIPE_BINS, UNWIND_BPS, dropOf(pool, moves)),
     swapBps: 0,
     lockSide: true,
   });
@@ -145,7 +168,7 @@ function pickSkims(
       pool.venue === "dlmm" &&
       !blocked.has(pool.poolAddress) &&
       !tapeBlocksEntry(pool, moves) &&
-      !chopBlocks(pool),
+      !entryBlocked(pool),
   );
   if (budget < config.fleetMinSlot || seatCap < config.fleetMinSlot || !free.length) return [];
   const maxSeats = Math.max(1, Math.floor(config.fleetSlots));
@@ -155,7 +178,7 @@ function pickSkims(
     const pass = free
       .map((pool) => skimQuote(pool, slot, moves))
       .filter((row) => row.metrics.metThreshold && row.metrics.edgeUsd > 0)
-      .sort((a, b) => b.metrics.edgeUsd - a.metrics.edgeUsd);
+      .sort((a, b) => feePerBin(b.pool) - feePerBin(a.pool) || b.metrics.edgeUsd - a.metrics.edgeUsd);
     if (pass.length < n) continue;
     return pass.slice(0, n).map((row) => ({
       pool: row.pool,
@@ -340,9 +363,11 @@ export function planFleet(args: {
           .map((pool) => ({ ...pool })),
         { deploySol: coreBudget, growth: true },
       );
-      const best = ranked.find(
-        (row) => row.metrics.metThreshold && allow(row.pool) && row.pool.side !== "curve" && !chopBlocks(row.pool),
-      );
+      const best = ranked
+        .filter(
+          (row) => row.metrics.metThreshold && allow(row.pool) && row.pool.side !== "curve" && !entryBlocked(row.pool),
+        )
+        .sort((a, b) => feePerBin(b.pool) - feePerBin(a.pool) || b.metrics.edgeUsd - a.metrics.edgeUsd)[0];
       if (best) {
         best.pool.side = "bid";
         opens.push({
@@ -370,18 +395,30 @@ export function planFleet(args: {
     .map((pool) => {
       const quoted = skimQuote(pool, previewSlot, args.moves);
       const blockedByTape = tapeBlocksEntry(pool, args.moves);
-      const blockedByChop = !blockedByTape && chopBlocks(pool);
+      const blockedByGeometry = !blockedByTape && geometryBlocks(pool);
+      const blockedByTravel = !blockedByTape && !blockedByGeometry && travelBlocks(pool);
+      const blockedByChop = !blockedByTape && !blockedByGeometry && !blockedByTravel && chopBlocks(pool);
+      const blockedByGate = blockedByTape || blockedByGeometry || blockedByTravel || blockedByChop;
+      const strategy = blockedByTape
+        ? "tape"
+        : blockedByGeometry
+          ? "geometry"
+          : blockedByTravel
+            ? "travel"
+            : blockedByChop
+              ? "chop"
+              : "skim";
       return {
         poolAddress: pool.poolAddress,
         poolName: pool.poolName,
         tokenSymbol: pool.tokenSymbol,
         venue: pool.venue,
         side: quoted.pool.side,
-        strategy: blockedByTape ? "tape" : blockedByChop ? "chop" : "skim",
+        strategy,
         opportunityScore: quoted.metrics.opportunityScore,
         edgeUsd: quoted.metrics.edgeUsd,
         fee30m: pool.fee30mUsd,
-        metThreshold: quoted.metrics.metThreshold && !blockedByTape && !blockedByChop && !quiet,
+        metThreshold: quoted.metrics.metThreshold && !blockedByGate && !quiet,
       };
     })
     .sort((a, b) => b.edgeUsd - a.edgeUsd)
@@ -411,6 +448,10 @@ export function planFleet(args: {
     summary = `board falling; best ${preview[0]?.poolName ?? "none"} $${(preview[0]?.edgeUsd ?? 0).toFixed(3)}`;
   } else if (falling) {
     summary = `tape falling; best ${preview[0]?.poolName ?? "none"} $${(preview[0]?.edgeUsd ?? 0).toFixed(3)}`;
+  } else if (preview.some((row) => row.strategy === "geometry")) {
+    summary = `fee rate too thin; best ${preview[0]?.poolName ?? "none"} $${(preview[0]?.edgeUsd ?? 0).toFixed(3)}`;
+  } else if (preview.some((row) => row.strategy === "travel")) {
+    summary = `no travel; best ${preview[0]?.poolName ?? "none"} $${(preview[0]?.edgeUsd ?? 0).toFixed(3)}`;
   } else if (preview.some((row) => row.strategy === "chop")) {
     summary = `no chop; best ${preview[0]?.poolName ?? "none"} $${(preview[0]?.edgeUsd ?? 0).toFixed(3)}`;
   } else if (preview[0]) {
