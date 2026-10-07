@@ -38,6 +38,8 @@ export const config = {
   growthWeekMs: num("GROWTH_WEEK_MS", 7 * 24 * 60 * 60 * 1000),
   growthRisk: num("GROWTH_RISK", 0.72),
   growthLossCut: num("GROWTH_LOSS_CUT", 0.12),
+  trailStartPct: num("TRAIL_START_PCT", 0.05),
+  trailDropPct: num("TRAIL_DROP_PCT", 0.08),
   binRange: num("BIN_RANGE", 13),
   scalpBins: num("SCALP_BINS", 6),
   scalpHoldMin: num("SCALP_HOLD_MIN", 12),
@@ -73,6 +75,8 @@ export const config = {
   proofnetworkTelemetry: bool("PROOFNETWORK_TELEMETRY", false),
   proofnetworkContract: process.env.PROOFNETWORK_CONTRACT ?? "",
   stateFile: process.env.STATE_FILE ?? ".degenlp-state.json",
+  /** One-shot. The state file records the epoch so the next boot keeps new closes. */
+  resetPnl: bool("RESET_PNL", false),
   port: num("PORT", 3000),
   dashboardPassword: process.env.DASHBOARD_PASSWORD ?? "",
   dashboardUser: process.env.DASHBOARD_USER ?? "admin",

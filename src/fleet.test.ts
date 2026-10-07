@@ -29,8 +29,22 @@ function pool(over: Partial<PoolCandidate> = {}): PoolCandidate {
     freezeDisabled: true,
     solPrice: 100,
     rangeHalfWidth: halfWidthFromBins(binStep, 6),
+    chopSamples: 8,
+    chopCrossings: 4,
+    chopNetBins: 0.5,
+    binSolUsd: 100_000,
     ...over,
   };
+}
+
+/** Fees hot enough that a one-bin SOL bid still clears the 4% touch. */
+function paying(over: Partial<PoolCandidate> = {}): PoolCandidate {
+  return pool({
+    fee30mUsd: 12_000,
+    fee1hUsd: 24_000,
+    volume30mUsd: 40_000,
+    ...over,
+  });
 }
 
 function seat(over: Partial<ActivePosition> = {}): ActivePosition {
@@ -93,8 +107,8 @@ test("a touch budget stays under the strict 4% fill", () => {
 
 test("several skim seats open when each quote clears, and a red pool stays out", () => {
   const quiet = pool({ poolAddress: "quiet", poolName: "QUIET-SOL", tokenSymbol: "QUIET", fee30mUsd: 40, fee1hUsd: 80 });
-  const a = pool();
-  const b = pool({ poolAddress: "pool-b", poolName: "NEXT-SOL", tokenSymbol: "NEXT" });
+  const a = paying();
+  const b = paying({ poolAddress: "pool-b", poolName: "NEXT-SOL", tokenSymbol: "NEXT" });
   const plan = planFleet({ pools: [quiet, a, b], seats: [], deploySol: 0.72, now, dlmmOnly: true });
   const again = planFleet({ pools: [quiet, a, b], seats: [], deploySol: 0.72, now, dlmmOnly: true });
   const sol = plan.opens.reduce((sum, row) => sum + row.solDeploy, 0);
@@ -145,6 +159,28 @@ test("a one-bin fill is scratched and a smaller dip is not", () => {
     now,
   });
   assert.equal(dip.closes.length, 0, dip.closes.map((row) => row.reason).join(","));
+});
+
+test("a skim that gave back a 5% run takes the trail", () => {
+  const plan = planFleet({
+    pools: [pool({ priceUsd: 1 })],
+    seats: [
+      seat({
+        feesAccruedUsd: 0.16,
+        costsUsd: 0.02,
+        peakNetUsd: 1.2,
+        solDeployed: 0.12,
+        solPrice: 100,
+        enteredAt: now - 30_000,
+        entryPrice: 1,
+        lastPrice: 1,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(plan.closes.length, 1);
+  assert.match(plan.closes[0].reason, /trail gave back/);
 });
 
 test("a green skim banks and does not reopen in the same pass", () => {
@@ -216,10 +252,88 @@ test("a core bid is not scratched on the first bin", () => {
 });
 
 test("one pool cannot take the whole book", () => {
-  const plan = planFleet({ pools: [pool()], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  const plan = planFleet({ pools: [paying()], seats: [], deploySol: 0.72, now, dlmmOnly: true });
   assert.equal(plan.opens.length, 1, plan.summary);
+  assert.equal(plan.opens[0].pool.side, "bid");
   assert.ok(plan.opens[0].solDeploy <= 0.72 * 0.22 + 1e-6);
   assert.ok(plan.opens[0].solDeploy >= 0.04);
+});
+
+test("a one-bin snipe stays inside the seat cap", () => {
+  const dense = paying({
+    poolAddress: "dense",
+    poolName: "DENSE-SOL",
+    tokenSymbol: "DENSE",
+    fee30mUsd: 40_000,
+    fee1hUsd: 80_000,
+    volume30mUsd: 80_000,
+  });
+  const plan = planFleet({ pools: [dense, paying()], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  const big = plan.opens.find((row) => row.pool.poolAddress === "dense");
+  assert.ok(big, plan.summary);
+  assert.equal(big.strategy, "skim");
+  assert.equal(big.pool.side, "bid");
+  assert.doesNotMatch(big.reason, /aggressive|curve/);
+  assert.ok(big.solDeploy <= 0.72 * 0.22 + 1e-6);
+  const sol = plan.opens.reduce((sum, row) => sum + row.solDeploy, 0);
+  assert.ok(sol <= 0.72 + 1e-9);
+});
+
+test("a one-way print is not a seat", () => {
+  const dump = paying({
+    fee30mUsd: 80_000,
+    fee1hUsd: 160_000,
+    chopSamples: 8,
+    chopCrossings: 0,
+    chopNetBins: 6,
+  });
+  const plan = planFleet({ pools: [dump], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.equal(plan.opens.length, 0);
+  assert.match(plan.summary, /no chop/);
+  assert.equal(plan.preview[0]?.strategy, "chop");
+});
+
+test("missing bin depth does not open", () => {
+  const blind = paying({ binSolUsd: undefined });
+  const plan = planFleet({ pools: [blind], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.equal(plan.opens.length, 0);
+  assert.match(plan.summary, /no chop/);
+});
+
+test("a falling board opens nothing and still scratches a fill", () => {
+  const paused = planFleet({
+    pools: [paying()],
+    seats: [],
+    deploySol: 0.72,
+    now,
+    dlmmOnly: true,
+    boardDown: true,
+  });
+  assert.equal(paused.opens.length, 0);
+  assert.match(paused.summary, /board falling/);
+
+  const scratch = planFleet({
+    pools: [pool({ priceUsd: 0.98 })],
+    seats: [seat({ enteredAt: now - 10_000 })],
+    deploySol: 0.72,
+    now,
+    boardDown: true,
+  });
+  assert.equal(scratch.opens.length, 0);
+  assert.equal(scratch.closes.length, 1);
+  assert.match(scratch.closes[0].reason, /scratched the fill/);
+});
+
+test("the first meme atom closes before the scratch price", () => {
+  const plan = planFleet({
+    pools: [pool({ priceUsd: 1 })],
+    seats: [seat({ filled: true, enteredAt: now - 10_000, entryPrice: 1, lastPrice: 1 })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(plan.closes.length, 1);
+  assert.equal(plan.closes[0].reason, "first meme atom");
+  assert.doesNotMatch(plan.closes[0].reason, /remains in the wallet/);
 });
 
 test("a falling tape and a wide bin block the entry", () => {
@@ -315,7 +429,7 @@ test("downwardMove is the drop from the window peak", () => {
 });
 
 test("an open pool is not entered twice", () => {
-  const other = pool({ poolAddress: "pool-b", poolName: "NEXT-SOL", tokenSymbol: "NEXT" });
+  const other = paying({ poolAddress: "pool-b", poolName: "NEXT-SOL", tokenSymbol: "NEXT" });
   const plan = planFleet({
     pools: [pool(), other],
     seats: [seat({ poolAddress: "pool-a" })],
@@ -324,4 +438,5 @@ test("an open pool is not entered twice", () => {
     dlmmOnly: true,
   });
   assert.ok(!plan.opens.some((row) => row.pool.poolAddress === "pool-a"));
+  assert.ok(plan.opens.some((row) => row.pool.poolAddress === "pool-b"), plan.summary);
 });

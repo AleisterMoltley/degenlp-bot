@@ -16,6 +16,8 @@ export interface BotState {
   closed: ActivePosition[];
   book: Book;
   growth?: GrowthLedger;
+  /** Set after a one-time clear of a book that counted failed leftover sells. */
+  pnlEpoch?: number;
 }
 
 export function emptyBook(): Book {
@@ -31,6 +33,9 @@ export function emptyBook(): Book {
   };
 }
 
+/** Bump this to clear the persisted book once more. A matching epoch is left alone. */
+export const PNL_EPOCH = 1;
+
 const defaultState = (): BotState => ({
   positionSeq: 0,
   active: null,
@@ -38,6 +43,19 @@ const defaultState = (): BotState => ({
   closed: [],
   book: emptyBook(),
 });
+
+/**
+ * Failed leftover sells were booked as closes. When armed, drop that book once.
+ * Open seats and the wallet file stay. A later restart keeps whatever the desk earns after.
+ */
+export function applyPnlEpoch(state: BotState, armed: boolean, epoch = PNL_EPOCH): boolean {
+  if (!armed || state.pnlEpoch === epoch) return false;
+  state.book = emptyBook();
+  state.closed = [];
+  if (state.growth) state.growth.realizedSol = 0;
+  state.pnlEpoch = epoch;
+  return true;
+}
 
 export function ensureGrowth(state: BotState): GrowthLedger {
   if (!state.growth) {
@@ -58,14 +76,20 @@ export function loadState(): BotState {
     const active = parsed.active ?? null;
     const listed = Array.isArray(parsed.seats) ? parsed.seats : [];
     const seats = listed.length ? listed : active ? [active] : [];
-    return {
+    const state: BotState = {
       positionSeq: parsed.positionSeq ?? 0,
       active: seats[0] ?? null,
       seats,
       closed: parsed.closed ?? [],
       book: { ...emptyBook(), ...(parsed.book ?? {}) },
       growth: parsed.growth,
+      pnlEpoch: parsed.pnlEpoch,
     };
+    if (applyPnlEpoch(state, config.resetPnl)) {
+      saveState(state);
+      console.log("[book] cleared stale pnl");
+    }
+    return state;
   } catch {
     return defaultState();
   }

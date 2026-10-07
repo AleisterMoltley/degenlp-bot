@@ -1,5 +1,7 @@
 import { buildCandidates, fetchOriginalOpportunityChecks, fetchTopPumpTokens } from "./apis.js";
 import { config } from "./config.js";
+import { bankableUsd } from "./edge.js";
+import { chopFromPrices } from "./chop.js";
 import { deploySolFor, equitySol, paceSol } from "./growth.js";
 import { DlmmExecutor, enterPositionDryRun } from "./executor.js";
 import { loadWalletKeypair, saveWalletSecret } from "./wallet.js";
@@ -100,6 +102,10 @@ export class DegenLpBot {
   private tapes = new Map<string, { at: number; price: number }[]>();
   private shockAt: number[] = [];
   private freezeUntil = 0;
+  private scanFlight: Promise<OpportunityCheck> | null = null;
+  private sweepHold = new Map<string, number>();
+  private mintSleep = new Map<string, number>();
+  private binSolCache = new Map<string, { at: number; sol: number }>();
 
   constructor() {
     this.state = loadState();
@@ -121,10 +127,18 @@ export class DegenLpBot {
   }
 
   async scanOnce(): Promise<OpportunityCheck> {
-    if (config.mirrorOriginal) {
-      return this.mirrorScan();
+    if (this.scanFlight) return this.scanFlight;
+    const flight = this.runScan();
+    this.scanFlight = flight;
+    try {
+      return await flight;
+    } finally {
+      if (this.scanFlight === flight) this.scanFlight = null;
     }
-    return this.independentScan();
+  }
+
+  private runScan(): Promise<OpportunityCheck> {
+    return config.mirrorOriginal ? this.mirrorScan() : this.independentScan();
   }
 
   private async independentScan(): Promise<OpportunityCheck> {
@@ -135,6 +149,7 @@ export class DegenLpBot {
     const tradable = candidates.filter((pool) => {
       if (held.has(pool.poolAddress)) return true;
       if ((this.cooloff.get(pool.poolAddress) ?? 0) > now) return false;
+      if ((this.mintSleep.get(pool.tokenMint) ?? 0) > now) return false;
       if (!config.dryRun && pool.venue !== "dlmm") return false;
       return true;
     });
@@ -151,6 +166,9 @@ export class DegenLpBot {
       this.markSeat(seat, candidates);
     }
     this.notePrices(candidates, now);
+    this.attachChop(tradable);
+    await this.attachBinDepth(tradable);
+    await this.noteFills();
     const plan = planFleet({
       pools: tradable,
       seats: this.state.seats,
@@ -160,6 +178,7 @@ export class DegenLpBot {
       dlmmOnly: !config.dryRun,
       moves: this.movesFor(candidates, now),
       freezeOpens: now < this.freezeUntil,
+      boardDown: this.boardIsDown(candidates, now),
     });
     this.lastTopCandidates = plan.preview.map((row) => ({
       poolName: row.poolName,
@@ -250,9 +269,9 @@ export class DegenLpBot {
         side: pos.side,
       });
       pos.solPrice = sol;
-    } else if (!pool && deployUsd > 0) {
-      pos.ilUsd = Math.max(pos.ilUsd, deployUsd * 0.5);
     }
+    const net = bankableUsd(pos.feesAccruedUsd, pos.ilUsd, pos.costsUsd, config.txCostUsd);
+    pos.peakNetUsd = Math.max(pos.peakNetUsd ?? net, net);
     pos.lastPrice = price;
     pos.lastMarkAt = now;
   }
@@ -297,6 +316,81 @@ export class DegenLpBot {
         if (!seen.has(key)) this.tapes.delete(key);
       }
     }
+  }
+
+  private attachChop(pools: PoolCandidate[]): void {
+    for (const pool of pools) {
+      if (pool.venue !== "dlmm") continue;
+      const read = chopFromPrices(
+        (this.tapes.get(pool.poolAddress) ?? []).map((row) => row.price),
+        pool.binStep ?? 80,
+      );
+      pool.chopSamples = read.samples;
+      pool.chopCrossings = read.crossings;
+      pool.chopNetBins = read.netBins;
+    }
+  }
+
+  /** Paper has no bin account, so the depth gate sees pool TVL. Live reads the active bin. */
+  private async attachBinDepth(pools: PoolCandidate[]): Promise<void> {
+    if (!this.executor) {
+      for (const pool of pools) {
+        if (pool.venue === "dlmm" && !(pool.binSolUsd != null && pool.binSolUsd > 0)) {
+          pool.binSolUsd = pool.pairLiquidityUsd * 0.5;
+        }
+      }
+      return;
+    }
+    const now = Date.now();
+    const ranked = pools
+      .filter((pool) => pool.venue === "dlmm" && (pool.chopCrossings ?? 0) >= 2 && (pool.chopSamples ?? 0) >= 4)
+      .sort((a, b) => b.fee30mUsd - a.fee30mUsd)
+      .slice(0, 4);
+    await Promise.all(
+      ranked.map(async (pool) => {
+        const hit = this.binSolCache.get(pool.poolAddress);
+        if (hit && now - hit.at < 20_000) {
+          pool.binSolUsd = hit.sol * (pool.solPrice || 0);
+          return;
+        }
+        try {
+          const sol = await this.executor!.activeBinSol(pool.poolAddress);
+          if (sol == null) return;
+          this.binSolCache.set(pool.poolAddress, { at: now, sol });
+          pool.binSolUsd = sol * (pool.solPrice || 0);
+        } catch {
+          console.error("[depth] active bin read failed");
+        }
+      }),
+    );
+  }
+
+  private async noteFills(): Promise<void> {
+    if (config.dryRun || !this.executor) return;
+    for (const seat of this.state.seats) {
+      try {
+        const raw = await this.executor.positionMemeRaw(seat.poolAddress, seat.positionAddress, seat.tokenMint);
+        seat.filled = raw > 0n;
+      } catch {
+        console.error("[fill] position read failed");
+      }
+    }
+  }
+
+  /** Half the watched pools stepped down together. One pool's tape is not the whole board. */
+  private boardIsDown(pools: PoolCandidate[], now: number): boolean {
+    let watched = 0;
+    let down = 0;
+    for (const pool of pools) {
+      if (pool.venue !== "dlmm") continue;
+      const tape = this.tapes.get(pool.poolAddress);
+      if (!tape || tape.length < 4) continue;
+      watched += 1;
+      const drop = downwardMove(tape, now, config.fleetTapeMs);
+      const step = Math.max(pool.binStep ?? 80, 1) / 10_000;
+      if (drop >= Math.max(step, 0.01)) down += 1;
+    }
+    return watched >= 8 && down / watched >= 0.5;
   }
 
   private movesFor(pools: PoolCandidate[], now: number): Record<string, number> {
@@ -464,11 +558,13 @@ export class DegenLpBot {
   }
 
   private async closeSeat(active: ActivePosition, reason: string, action: BotDecision) {
+    // The burst that paid a cent is still the burst. Sleep the mint on every close.
+    this.mintSleep.set(active.tokenMint, Date.now() + 3 * 60_000);
     let sig = "dry_run_exit";
     if (!config.dryRun && this.executor) {
       const exists = await this.executor.positionExists(active.positionAddress);
       sig = await this.executor.exit(active, exists ? reason : "Position not found on-chain - already closed");
-      const settled = await this.executor.settleMeme(active.tokenMint);
+      const settled = await this.executor.settleMeme(active.tokenMint, active.poolAddress);
       if (settled === "swapped") active.costsUsd += config.txCostUsd;
       if (settled === "stuck") this.cooloff.set(active.poolAddress, Date.now() + 15 * 60_000);
     } else {
@@ -684,7 +780,27 @@ export class DegenLpBot {
           }
         }
       }
+      await this.sweepLeftovers();
       await this.waitInterval();
+    }
+  }
+
+  /** Sell meme tokens that a close left in the wallet. Buys stay on the 3% cap. */
+  private async sweepLeftovers(): Promise<void> {
+    if (config.dryRun || !this.executor) return;
+    let rows: Array<{ mint: string; amount: bigint }> = [];
+    try {
+      rows = await this.executor.memeBalances();
+    } catch {
+      console.error("[sweep] balance read failed");
+      return;
+    }
+    const now = Date.now();
+    for (const row of rows) {
+      if ((this.sweepHold.get(row.mint) ?? 0) > now) continue;
+      const settled = await this.executor.settleMeme(row.mint);
+      if (settled === "swapped") this.sweepHold.delete(row.mint);
+      else if (settled === "stuck") this.sweepHold.set(row.mint, now + 15_000);
     }
   }
 

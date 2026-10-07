@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { bs58 } from "@coral-xyz/anchor/dist/cjs/utils/bytes";
 import { Keypair } from "@solana/web3.js";
-import { assertSwapQuote } from "./jupiter.js";
+import { assertSwapQuote, quoteFailure, sellSlices } from "./jupiter.js";
 import { capDeploySol, parseWalletSecret, saveWalletSecret } from "./wallet.js";
 
 test("a base58 secret and a json byte array resolve to the same public key", () => {
@@ -25,6 +25,19 @@ test("capDeploySol keeps a fee reserve and refuses a dust wallet", () => {
   assert.equal(capDeploySol(0.72, 1_000_000_000), 0.72);
   assert.equal(capDeploySol(0.72, 200_000_000), 0.15);
   assert.throws(() => capDeploySol(0.72, 80_000_000), /fee reserve/);
+});
+
+test("a sell tries the full bag and then smaller slices", () => {
+  assert.deepEqual(sellSlices(100n), [100n, 99n, 90n, 50n, 25n, 10n]);
+  assert.deepEqual(sellSlices(3n), [3n, 2n, 1n]);
+  assert.deepEqual(sellSlices(1n), [1n]);
+  assert.deepEqual(sellSlices(0n), []);
+});
+
+test("a rejected quote keeps the status and the route error", () => {
+  const msg = quoteFailure(400, JSON.stringify({ errorCode: "NO_ROUTES_FOUND", error: "No routes found" }));
+  assert.match(msg, /400/);
+  assert.match(msg, /NO_ROUTES_FOUND/);
 });
 
 test("a swap quote with no output or a wide impact is refused", () => {

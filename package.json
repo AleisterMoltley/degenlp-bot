@@ -14,7 +14,7 @@
     "once": "tsx src/index.ts once",
     "deploy-contract": "tsx src/index.ts deploy-contract",
     "build": "tsc",
-    "test": "tsx --test src/pnl.test.ts src/edge.test.ts src/growth.test.ts src/plan.test.ts src/wallet.test.ts src/fleet.test.ts"
+    "test": "tsx --test src/pnl.test.ts src/edge.test.ts src/growth.test.ts src/plan.test.ts src/wallet.test.ts src/chop.test.ts src/state.test.ts src/fleet.test.ts"
   },
   "keywords": [],
   "author": "",

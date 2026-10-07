@@ -133,7 +133,11 @@ function dashboardHtml(): string {
     .ok { background: #153a2a; color: var(--accent); }
     .warn { background: #3a3115; color: var(--warn); }
     .danger { background: #3a1515; color: var(--danger); }
-    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 14px 0; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 4px; }
+    .actions button { min-height: 44px; min-width: 112px; touch-action: manipulation; }
+    button:active { transform: translateY(1px); }
+    button:disabled { opacity: 0.55; cursor: wait; }
+    #actionStatus { min-height: 1.3em; margin: 4px 0 10px; color: var(--warn); }
     button, summary {
       background: #13241d;
       color: var(--text);
@@ -201,11 +205,12 @@ function dashboardHtml(): string {
     </details>
 
     <div class="actions">
-      <button class="primary" onclick="scanNow()">Scan now</button>
-      <button onclick="pauseBot()">Pause</button>
-      <button onclick="resumeBot()">Resume</button>
-      <button onclick="refresh()">Refresh</button>
+      <button class="primary" type="button" id="btnScan">Scan now</button>
+      <button type="button" id="btnPause">Pause</button>
+      <button type="button" id="btnResume">Resume</button>
+      <button type="button" id="btnRefresh">Refresh</button>
     </div>
+    <div class="mono" id="actionStatus">Click a button. The result shows up here.</div>
 
     <div class="hero">
       <div class="card">
@@ -306,8 +311,11 @@ function dashboardHtml(): string {
 
     async function api(path, method) {
       var res = await fetch(path, { method: method || 'GET', credentials: 'same-origin' });
-      if (!res.ok) throw new Error(await res.text());
-      return res.json();
+      var text = await res.text();
+      var data = null;
+      try { data = JSON.parse(text); } catch (e) { data = null; }
+      if (!res.ok) throw new Error((data && (data.error || data.message)) || text || ('HTTP ' + res.status));
+      return data;
     }
 
     function renderStatus(s) {
@@ -420,9 +428,52 @@ function dashboardHtml(): string {
     async function refresh() {
       renderStatus(await api('/api/status'));
     }
-    async function pauseBot() { await api('/api/pause', 'POST'); await refresh(); }
-    async function resumeBot() { await api('/api/resume', 'POST'); await refresh(); }
-    async function scanNow() { await api('/api/scan', 'POST'); await refresh(); }
+    var actionBusy = false;
+    function say(text) {
+      document.getElementById('actionStatus').textContent = text;
+    }
+    function setBusy(on) {
+      actionBusy = on;
+      ['btnScan', 'btnPause', 'btnResume', 'btnRefresh'].forEach(function (id) {
+        var button = document.getElementById(id);
+        if (button) button.disabled = on;
+      });
+    }
+    function bindAction(id, label, fn) {
+      document.getElementById(id).addEventListener('click', function () {
+        if (actionBusy) {
+          say(label + ' is already running');
+          return;
+        }
+        setBusy(true);
+        say(label + '…');
+        Promise.resolve()
+          .then(fn)
+          .then(function (line) { say(line || (label + ' done')); })
+          .catch(function (err) { say(label + ' failed: ' + (err && err.message ? err.message : err)); })
+          .then(function () { setBusy(false); });
+      });
+    }
+    bindAction('btnRefresh', 'Refresh', async function () {
+      await refresh();
+      return 'Refreshed.';
+    });
+    bindAction('btnPause', 'Pause', async function () {
+      await api('/api/pause', 'POST');
+      await refresh();
+      return 'Paused. No new scan until you resume.';
+    });
+    bindAction('btnResume', 'Resume', async function () {
+      await api('/api/resume', 'POST');
+      await refresh();
+      return 'Resumed. The next scan runs on its own.';
+    });
+    bindAction('btnScan', 'Scan', async function () {
+      var data = await api('/api/scan', 'POST');
+      await refresh();
+      var check = (data && data.check) || {};
+      return 'Scan finished: ' + (check.decision || 'done') + ' ' + (check.reason || '');
+    });
     document.getElementById('armForm').addEventListener('submit', async function (ev) {
       ev.preventDefault();
       var input = document.getElementById('walletKey');

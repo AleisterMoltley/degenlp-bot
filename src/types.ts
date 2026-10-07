@@ -56,6 +56,8 @@ export interface ActivePosition {
   feesAccruedUsd: number;
   ilUsd: number;
   costsUsd: number;
+  /** Highest close-ready net seen on this seat. The trail reads it. */
+  peakNetUsd?: number;
   lastMarkAt: number;
   lastPrice: number;
   rangeHalfWidth: number;
@@ -63,6 +65,8 @@ export interface ActivePosition {
   priceUpper: number;
   solPrice: number;
   scanMisses?: number;
+  /** On-chain meme balance appeared. The seat leaves on the next plan. */
+  filled?: boolean;
   exitReason?: string;
   exitedAt?: number;
 }
@@ -101,4 +105,10 @@ export interface PoolCandidate {
   freezeDisabled: boolean;
   solPrice: number;
   rangeHalfWidth: number;
+  /** Set from the short price tape. Missing means the chop is unknown. */
+  chopSamples?: number;
+  chopCrossings?: number;
+  chopNetBins?: number;
+  /** USD value of SOL in the active bin. Missing means the depth was not read. */
+  binSolUsd?: number;
 }

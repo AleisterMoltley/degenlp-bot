@@ -1,6 +1,7 @@
+import { chopShapeOk, depthOk } from "./chop.js";
 import { config } from "./config.js";
-import { bankableUsd } from "./edge.js";
-import { markIlUsd } from "./pnl.js";
+import { bankableUsd, trailGaveBack } from "./edge.js";
+import { halfWidthFromBins, markIlUsd } from "./pnl.js";
 import { computeMetrics, planPosition, rankPools, type Metrics } from "./scorer.js";
 import type { ActivePosition, BotDecision, PoolCandidate } from "./types.js";
 
@@ -100,15 +101,32 @@ function isSkim(seat: ActivePosition): boolean {
   return seat.strategy === "skim";
 }
 
+const SNIPE_BINS = 1;
+
+function chopBlocks(pool: PoolCandidate): boolean {
+  if (pool.venue !== "dlmm") return false;
+  const shape = chopShapeOk({
+    samples: pool.chopSamples ?? 0,
+    crossings: pool.chopCrossings ?? 0,
+    netBins: pool.chopNetBins ?? Number.POSITIVE_INFINITY,
+  });
+  const depth = depthOk(pool.volume30mUsd / 30, pool.binSolUsd);
+  return !shape || !depth;
+}
+
 function skimQuote(
   pool: PoolCandidate,
   sol: number,
   moves?: Record<string, number>,
 ): { pool: PoolCandidate; metrics: Metrics } {
-  const copy: PoolCandidate = { ...pool, side: "bid" };
+  const copy: PoolCandidate = {
+    ...pool,
+    side: "bid",
+    rangeHalfWidth: halfWidthFromBins(pool.binStep ?? 80, SNIPE_BINS),
+  };
   const metrics = computeMetrics(copy, sol, true, {
     holdMin: config.fleetHoldMin,
-    fillFraction: skimFillFraction(pool.binStep, config.scalpBins, Math.max(config.swapBps, 300), dropOf(pool, moves)),
+    fillFraction: skimFillFraction(pool.binStep, SNIPE_BINS, Math.max(config.swapBps, 300), dropOf(pool, moves)),
     swapBps: 0,
     lockSide: true,
   });
@@ -123,7 +141,11 @@ function pickSkims(
   seatCap: number,
 ): FleetOpen[] {
   const free = pools.filter(
-    (pool) => pool.venue === "dlmm" && !blocked.has(pool.poolAddress) && !tapeBlocksEntry(pool, moves),
+    (pool) =>
+      pool.venue === "dlmm" &&
+      !blocked.has(pool.poolAddress) &&
+      !tapeBlocksEntry(pool, moves) &&
+      !chopBlocks(pool),
   );
   if (budget < config.fleetMinSlot || seatCap < config.fleetMinSlot || !free.length) return [];
   const maxSeats = Math.max(1, Math.floor(config.fleetSlots));
@@ -169,6 +191,8 @@ export function planFleet(args: {
   dlmmOnly?: boolean;
   moves?: Record<string, number>;
   freezeOpens?: boolean;
+  /** Most watched pools printed down together. New opens wait. */
+  boardDown?: boolean;
 }): FleetPlan {
   const lossCut = args.lossCut ?? config.growthLossCut;
   const closes: FleetClose[] = [];
@@ -176,6 +200,10 @@ export function planFleet(args: {
   let coreReopen: FleetOpen | null = null;
 
   for (const seat of args.seats) {
+    if (seat.filled) {
+      closes.push({ id: seat.id, action: "exit", reason: "first meme atom" });
+      continue;
+    }
     const pool = args.pools.find((row) => row.poolAddress === seat.poolAddress);
     if (!pool) {
       if ((seat.scanMisses ?? 0) >= 4) {
@@ -206,6 +234,7 @@ export function planFleet(args: {
       const liveIl = seatIl(seat, pool, price);
       const bankable = bankableUsd(seat.feesAccruedUsd, liveIl, seat.costsUsd, config.txCostUsd);
       const solPx = pool.solPrice || seat.solPrice || 0;
+      const deployUsd = seat.solDeployed * solPx;
       if (fast && held >= config.fleetFastExitMs && bankable < config.fleetBankUsd) {
         closes.push({ id: seat.id, action: "exit", reason: "tape turned on the bid" });
         continue;
@@ -216,6 +245,18 @@ export function planFleet(args: {
           closes.push({ id: seat.id, action: "exit", reason: "seat lost the risk budget" });
           continue;
         }
+      }
+      if (
+        trailGaveBack({
+          bankableUsd: bankable,
+          peakNetUsd: seat.peakNetUsd ?? bankable,
+          deployUsd,
+          startPct: config.trailStartPct,
+          dropPct: config.trailDropPct,
+        })
+      ) {
+        closes.push({ id: seat.id, action: "exit", reason: "trail gave back the run" });
+        continue;
       }
       if (held >= config.fleetBankMinMs && bankable >= config.fleetBankUsd) {
         closes.push({ id: seat.id, action: "exit", reason: `banked $${bankable.toFixed(3)} on the skim` });
@@ -271,9 +312,11 @@ export function planFleet(args: {
 
   const allow = (pool: PoolCandidate) => !args.dlmmOnly || pool.venue === "dlmm";
   const seatCap = floorSol(args.deploySol * Math.min(0.5, Math.max(0.05, config.fleetMaxSeatShare)));
+  const quiet = args.freezeOpens || args.boardDown;
 
   if (
     coreReopen &&
+    !quiet &&
     allow(coreReopen.pool) &&
     !tapeBlocksEntry(coreReopen.pool, args.moves) &&
     coreReopen.solDeploy <= free + 1e-9 &&
@@ -285,7 +328,7 @@ export function planFleet(args: {
   }
 
   const coreKept = kept.some((seat) => !isSkim(seat));
-  if (!coreKept && !coreReopen && !args.freezeOpens) {
+  if (!coreKept && !coreReopen && !quiet) {
     const coreBudget = Math.min(
       floorSol(args.deploySol * Math.min(0.5, Math.max(0, config.fleetCoreShare))),
       seatCap,
@@ -297,8 +340,11 @@ export function planFleet(args: {
           .map((pool) => ({ ...pool })),
         { deploySol: coreBudget, growth: true },
       );
-      const best = ranked.find((row) => row.metrics.metThreshold && allow(row.pool));
+      const best = ranked.find(
+        (row) => row.metrics.metThreshold && allow(row.pool) && row.pool.side !== "curve" && !chopBlocks(row.pool),
+      );
       if (best) {
+        best.pool.side = "bid";
         opens.push({
           pool: best.pool,
           metrics: best.metrics,
@@ -312,7 +358,7 @@ export function planFleet(args: {
     }
   }
 
-  const skims = args.freezeOpens
+  const skims = quiet
     ? []
     : pickSkims(args.pools, free, blocked, args.moves, seatCap).filter((row) => allow(row.pool));
   opens.push(...skims);
@@ -324,17 +370,18 @@ export function planFleet(args: {
     .map((pool) => {
       const quoted = skimQuote(pool, previewSlot, args.moves);
       const blockedByTape = tapeBlocksEntry(pool, args.moves);
+      const blockedByChop = !blockedByTape && chopBlocks(pool);
       return {
         poolAddress: pool.poolAddress,
         poolName: pool.poolName,
         tokenSymbol: pool.tokenSymbol,
         venue: pool.venue,
         side: quoted.pool.side,
-        strategy: blockedByTape ? "tape" : "skim",
+        strategy: blockedByTape ? "tape" : blockedByChop ? "chop" : "skim",
         opportunityScore: quoted.metrics.opportunityScore,
         edgeUsd: quoted.metrics.edgeUsd,
         fee30m: pool.fee30mUsd,
-        metThreshold: quoted.metrics.metThreshold && !blockedByTape && !args.freezeOpens,
+        metThreshold: quoted.metrics.metThreshold && !blockedByTape && !blockedByChop && !quiet,
       };
     })
     .sort((a, b) => b.edgeUsd - a.edgeUsd)
@@ -360,8 +407,12 @@ export function planFleet(args: {
     summary = `open ${opens.length}${names ? ` (${names})` : ""} close ${closes.length}`;
   } else if (args.seats.length) {
     summary = `holding ${args.seats.length}`;
+  } else if (args.boardDown) {
+    summary = `board falling; best ${preview[0]?.poolName ?? "none"} $${(preview[0]?.edgeUsd ?? 0).toFixed(3)}`;
   } else if (falling) {
     summary = `tape falling; best ${preview[0]?.poolName ?? "none"} $${(preview[0]?.edgeUsd ?? 0).toFixed(3)}`;
+  } else if (preview.some((row) => row.strategy === "chop")) {
+    summary = `no chop; best ${preview[0]?.poolName ?? "none"} $${(preview[0]?.edgeUsd ?? 0).toFixed(3)}`;
   } else if (preview[0]) {
     summary = `no pool clears costs; best ${preview[0].poolName} $${preview[0].edgeUsd.toFixed(3)}`;
   }

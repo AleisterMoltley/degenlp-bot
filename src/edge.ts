@@ -152,3 +152,19 @@ export function chooseShape(pool: PoolCandidate, input: EdgeInput): LpSide {
 export function bankableUsd(fees: number, il: number, costs: number, exitTx: number): number {
   return fees - il - costs - exitTx;
 }
+
+/**
+ * Hunter trail: arm after the seat is ahead by startPct of its size, then
+ * leave once it gives back dropPct of that size from the peak.
+ */
+export function trailGaveBack(args: {
+  bankableUsd: number;
+  peakNetUsd: number;
+  deployUsd: number;
+  startPct: number;
+  dropPct: number;
+}): boolean {
+  if (!(args.deployUsd > 0) || !(args.startPct > 0) || !(args.dropPct > 0)) return false;
+  if (args.peakNetUsd < args.deployUsd * args.startPct) return false;
+  return args.bankableUsd <= args.peakNetUsd - args.deployUsd * args.dropPct;
+}

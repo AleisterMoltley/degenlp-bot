@@ -1,14 +1,16 @@
 import DLMM, { StrategyType } from "@meteora-ag/dlmm";
+import { createBurnInstruction, createCloseAccountInstruction } from "@solana/spl-token";
 import {
   Connection,
   Keypair,
   PublicKey,
   sendAndConfirmTransaction,
+  Transaction,
   VersionedTransaction,
 } from "@solana/web3.js";
 import BN from "bn.js";
 import { config } from "./config.js";
-import { buildJupiterSwap, SOL_MINT } from "./jupiter.js";
+import { buildJupiterSwap, sellSlices, SOL_MINT } from "./jupiter.js";
 import { buildPosition } from "./position.js";
 import type { ActivePosition, OpportunityCheck, PoolCandidate } from "./types.js";
 import { capDeploySol, loadWalletKeypair, SOL_RESERVE_LAMPORTS } from "./wallet.js";
@@ -17,6 +19,16 @@ const TOKEN_PROGRAMS = [
   new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
   new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"),
 ];
+
+/** Below this raw balance Jupiter has no route. It is closed out of the wallet. A real bag is never burned. */
+const DUST_RAW = 10_000n;
+
+interface TokenBag {
+  account: string;
+  program: string;
+  mint: string;
+  amount: bigint;
+}
 
 export class DlmmExecutor {
   private connection: Connection;
@@ -48,6 +60,30 @@ export class DlmmExecutor {
     return info !== null;
   }
 
+  /** SOL in the active bin, in SOL. The caller prices it. */
+  async activeBinSol(poolAddress: string): Promise<number | null> {
+    const dlmm = await DLMM.create(this.connection, new PublicKey(poolAddress));
+    const bin = await dlmm.getActiveBin();
+    const y = dlmm.tokenY.publicKey.toBase58();
+    const x = dlmm.tokenX.publicKey.toBase58();
+    const raw = y === SOL_MINT ? bin.yAmount : x === SOL_MINT ? bin.xAmount : null;
+    if (!raw) return null;
+    const sol = Number(raw.toString()) / 1e9;
+    return Number.isFinite(sol) && sol > 0 ? sol : null;
+  }
+
+  /** Meme principal plus unpaid meme fees. Zero means the bid is still SOL. */
+  async positionMemeRaw(poolAddress: string, positionAddress: string, memeMint: string): Promise<bigint> {
+    const dlmm = await DLMM.create(this.connection, new PublicKey(poolAddress));
+    const position = await dlmm.getPosition(new PublicKey(positionAddress));
+    const memeIsX = dlmm.tokenX.publicKey.toBase58() === memeMint;
+    const data = position.positionData;
+    const principal = BigInt(memeIsX ? data.totalXAmount || "0" : data.totalYAmount || "0");
+    const fee = memeIsX ? data.feeX : data.feeY;
+    const feeRaw = BigInt(fee?.toString() || "0");
+    return principal + feeRaw;
+  }
+
   async enter(candidate: PoolCandidate, check: OpportunityCheck, solDeploy = config.solDeploy): Promise<ActivePosition> {
     const positionKp = Keypair.generate();
     const dlmm = await DLMM.create(this.connection, new PublicKey(candidate.poolAddress));
@@ -62,59 +98,31 @@ export class DlmmExecutor {
       throw new Error(`pool has no SOL side: ${candidate.poolName}`);
     }
 
-    const curve = candidate.side === "curve";
-    const minBinId = active.binId - config.scalpBins;
-    const maxBinId = curve ? active.binId + config.scalpBins : active.binId;
-    let totalXAmount = new BN(solIsY ? 0 : deployLamports);
-    let totalYAmount = new BN(solIsY ? deployLamports : 0);
-    let swapped = false;
+    // One SOL bin under the active price. A curve would buy the meme before any fee arrives.
+    const minBinId = active.binId - 1;
+    const maxBinId = active.binId - 1;
+    const totalXAmount = new BN(solIsY ? 0 : deployLamports);
+    const totalYAmount = new BN(solIsY ? deployLamports : 0);
 
     console.log(
-      `[enter] ${candidate.poolName} ${curve ? "curve" : "bid"} bins ${minBinId}..${maxBinId} deploy ${solDeployed} SOL`,
+      `[enter] ${candidate.poolName} bid bin ${minBinId} deploy ${solDeployed} SOL`,
     );
 
     let entrySignature = "dry_run";
-    try {
-      if (!config.dryRun && curve) {
-        const memeMint = solIsY ? tokenX : tokenY;
-        const swapLamports = Math.floor(deployLamports / 2);
-        const swap = await this.swapSolForMeme(memeMint, swapLamports);
-        swapped = true;
-        const solAfter = await this.connection.getBalance(this.wallet.publicKey, "confirmed");
-        const solForLp = Math.min(
-          deployLamports - swapLamports,
-          Math.max(0, solAfter - SOL_RESERVE_LAMPORTS),
-        );
-        if (solForLp < 10_000_000 || swap.gained <= 0n) {
-          throw new Error("curve sides were empty after the swap");
-        }
-        const meme = new BN(swap.gained.toString());
-        const sol = new BN(solForLp);
-        totalXAmount = solIsY ? meme : sol;
-        totalYAmount = solIsY ? sol : meme;
-      }
-
-      if (!config.dryRun) {
-        const tx = await dlmm.initializePositionAndAddLiquidityByStrategy({
-          positionPubKey: positionKp.publicKey,
-          user: this.wallet.publicKey,
-          totalXAmount,
-          totalYAmount,
-          strategy: {
-            minBinId,
-            maxBinId,
-            strategyType: curve ? StrategyType.Curve : StrategyType.Spot,
-          },
-          slippage: curve ? 3 : 1,
-        });
-        entrySignature = await sendAndConfirmTransaction(this.connection, tx, [this.wallet, positionKp]);
-      }
-    } catch (err) {
-      if (swapped) {
-        console.error(`[enter] curve deposit failed after the swap on ${candidate.poolName}; meme token remains in the wallet`);
-        throw new Error(`curve deposit failed after the swap on ${candidate.poolName}; meme token remains in the wallet`);
-      }
-      throw err;
+    if (!config.dryRun) {
+      const tx = await dlmm.initializePositionAndAddLiquidityByStrategy({
+        positionPubKey: positionKp.publicKey,
+        user: this.wallet.publicKey,
+        totalXAmount,
+        totalYAmount,
+        strategy: {
+          minBinId,
+          maxBinId,
+          strategyType: StrategyType.Spot,
+        },
+        slippage: 1,
+      });
+      entrySignature = await sendAndConfirmTransaction(this.connection, tx, [this.wallet, positionKp]);
     }
 
     return buildPosition({
@@ -156,8 +164,17 @@ export class DlmmExecutor {
     return lastSig;
   }
 
+  /** Token balances other than native SOL. Wrapped SOL is skipped. */
+  async memeBalances(): Promise<Array<{ mint: string; amount: bigint }>> {
+    const totals = new Map<string, bigint>();
+    for (const bag of await this.tokenBags()) {
+      totals.set(bag.mint, (totals.get(bag.mint) ?? 0n) + bag.amount);
+    }
+    return [...totals.entries()].map(([mint, amount]) => ({ mint, amount }));
+  }
+
   /** After a bid or curve is removed, sell a leftover meme back to SOL. A failed unwind does not pause the desk. */
-  async settleMeme(mint: string): Promise<"flat" | "swapped" | "stuck"> {
+  async settleMeme(mint: string, poolAddress?: string): Promise<"flat" | "swapped" | "stuck"> {
     if (!mint || mint === SOL_MINT) return "flat";
     let amount = 0n;
     try {
@@ -168,47 +185,279 @@ export class DlmmExecutor {
     }
     if (amount <= 0n) return "flat";
     try {
-      await this.swapToSol(mint, amount);
+      await this.swapToSol(mint, amount, poolAddress);
       return "swapped";
-    } catch {
-      console.error("[scratch] unwind failed; meme token was not swapped");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "unwind failed";
+      console.error(`[scratch] unwind failed; meme token was not swapped (${msg})`);
       return "stuck";
     }
   }
 
-  private async swapToSol(inputMint: string, amount: bigint): Promise<void> {
+  private async swapToSol(inputMint: string, amount: bigint, poolAddress?: string): Promise<void> {
+    let last = "unwind failed";
+    const soldOnJupiter = await this.sellThroughJupiter(inputMint, amount, (msg) => {
+      last = msg;
+    });
+    if (soldOnJupiter) return;
+    let left = await this.rawBalance(inputMint);
+    if (left <= 0n) return;
+    if (left <= DUST_RAW && /NO_ROUTES|no routes/i.test(last)) {
+      await this.burnDust(inputMint);
+      return;
+    }
+    try {
+      await this.sellThroughDlmm(inputMint, left, poolAddress);
+      left = await this.rawBalance(inputMint);
+      if (left <= 0n) return;
+    } catch (err) {
+      last = err instanceof Error ? err.message : last;
+    }
+    left = await this.rawBalance(inputMint);
+    if (left <= 0n) return;
+    if (left <= DUST_RAW) {
+      await this.burnDust(inputMint);
+      return;
+    }
+    throw new Error(last);
+  }
+
+  /** Try several sizes. A 429 is retried. A send whose confirm expires still counts once the balance drops. */
+  private async sellThroughJupiter(
+    inputMint: string,
+    amount: bigint,
+    onError: (msg: string) => void,
+  ): Promise<boolean> {
+    let left = amount;
+    for (const slice of sellSlices(amount)) {
+      if (left <= 0n) return true;
+      const use = slice > left ? left : slice;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const before = await this.rawBalance(inputMint);
+        if (before <= 0n) return true;
+        const sized = use > before ? before : use;
+        try {
+          await this.sendMemeSell(inputMint, sized);
+          left = await this.rawBalance(inputMint);
+          if (left <= 0n) return true;
+          break;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "unwind failed";
+          onError(msg);
+          if (await this.balanceDropped(inputMint, before)) {
+            left = await this.rawBalance(inputMint);
+            if (left <= 0n) return true;
+            break;
+          }
+          if (/429|503|500|rate limit/i.test(msg) && attempt < 2) {
+            await sleep(400 * (attempt + 1));
+            continue;
+          }
+          break;
+        }
+      }
+      left = await this.rawBalance(inputMint);
+    }
+    return (await this.rawBalance(inputMint)) <= 0n;
+  }
+
+  /**
+   * Helius rejects sendTransaction preflight for this sell with InsufficientFunds
+   * after simulateTransaction has accepted the same signed transaction.
+   * Simulate first, then send with preflight skipped.
+   */
+  private async sendMemeSell(inputMint: string, amount: bigint): Promise<void> {
     const built = await buildJupiterSwap({
       inputMint,
       outputMint: SOL_MINT,
       amount,
       userPublicKey: this.wallet.publicKey.toBase58(),
+      slippageBps: 5_000,
+      maxImpact: 0.95,
     });
     const tx = VersionedTransaction.deserialize(Buffer.from(built.swapTransaction, "base64"));
     tx.sign([this.wallet]);
-    const signature = await this.connection.sendRawTransaction(tx.serialize(), { maxRetries: 3 });
-    const height = built.lastValidBlockHeight;
-    if (height > 0) {
-      const result = await this.connection.confirmTransaction(
-        { signature, blockhash: tx.message.recentBlockhash, lastValidBlockHeight: height },
-        "confirmed",
-      );
+    const sim = await this.connection.simulateTransaction(tx, {
+      commitment: "confirmed",
+      sigVerify: true,
+    });
+    if (sim.value.err) {
+      const detail = (sim.value.logs ?? [])
+        .filter((line) => /error|failed|insufficient/i.test(line))
+        .slice(-3)
+        .join(" | ");
+      throw new Error(`swap simulation rejected amount=${amount} ${detail || JSON.stringify(sim.value.err)}`);
+    }
+    const before = await this.rawBalance(inputMint);
+    const signature = await this.connection.sendRawTransaction(tx.serialize(), {
+      skipPreflight: true,
+      maxRetries: 3,
+    });
+    try {
+      const height = built.lastValidBlockHeight;
+      const result =
+        height > 0
+          ? await this.connection.confirmTransaction(
+              { signature, blockhash: tx.message.recentBlockhash, lastValidBlockHeight: height },
+              "confirmed",
+            )
+          : await this.connection.confirmTransaction(signature, "confirmed");
       if (result.value.err) throw new Error("swap transaction failed");
-    } else {
-      const result = await this.connection.confirmTransaction(signature, "confirmed");
-      if (result.value.err) throw new Error("swap transaction failed");
+    } catch (err) {
+      if (await this.balanceDropped(inputMint, before)) {
+        console.log(`[swap] meme back to SOL sig=${signature}`);
+        return;
+      }
+      throw err;
     }
     console.log(`[swap] meme back to SOL sig=${signature}`);
+  }
+
+  private async balanceDropped(mint: string, before: bigint): Promise<boolean> {
+    if ((await this.rawBalance(mint)) < before) return true;
+    await sleep(800);
+    return (await this.rawBalance(mint)) < before;
+  }
+
+  /** The pool we just left, then any other SOL pair for this mint. */
+  private async sellThroughDlmm(mint: string, amount: bigint, poolAddress?: string): Promise<void> {
+    const pools = await this.solPoolsForMint(mint, poolAddress);
+    if (!pools.length) throw new Error("no SOL pool to unwind the meme");
+    let left = amount;
+    let last = "dlmm unwind failed";
+    for (const pool of pools) {
+      if (left <= 0n) return;
+      for (let pass = 0; pass < 4 && left > 0n; pass += 1) {
+        const before = left;
+        try {
+          await this.swapOnDlmm(pool, mint, left);
+        } catch (err) {
+          last = err instanceof Error ? err.message : last;
+          break;
+        }
+        left = await this.rawBalance(mint);
+        if (left >= before) break;
+      }
+      if (left <= 0n) return;
+    }
+    if ((await this.rawBalance(mint)) <= 0n) return;
+    throw new Error(last);
+  }
+
+  private async solPoolsForMint(mint: string, hint?: string): Promise<string[]> {
+    const found: string[] = [];
+    const push = (address: string) => {
+      if (address && !found.includes(address)) found.push(address);
+    };
+    if (hint) push(hint);
+    try {
+      const url =
+        "https://dlmm.datapi.meteora.ag/pools?" +
+        new URLSearchParams({ page: "1", page_size: "10", query: mint, sort_by: "tvl:desc" });
+      const res = await fetch(url, { signal: AbortSignal.timeout(12_000) });
+      if (!res.ok) return found;
+      const body = (await res.json()) as {
+        data?: Array<{ address?: string; token_x?: { address?: string }; token_y?: { address?: string } }>;
+      };
+      for (const pool of body.data ?? []) {
+        const x = pool.token_x?.address ?? "";
+        const y = pool.token_y?.address ?? "";
+        const sol = x === SOL_MINT || y === SOL_MINT;
+        const meme = x === mint || y === mint;
+        if (sol && meme && pool.address) push(pool.address);
+      }
+    } catch {
+      /* The hinted pool is still tried. */
+    }
+    return found.slice(0, 3);
+  }
+
+  private async swapOnDlmm(poolAddress: string, mint: string, amount: bigint): Promise<void> {
+    const dlmm = await DLMM.create(this.connection, new PublicKey(poolAddress));
+    const memeIsX = dlmm.tokenX.publicKey.toBase58() === mint;
+    const other = memeIsX ? dlmm.tokenY.publicKey.toBase58() : dlmm.tokenX.publicKey.toBase58();
+    if (!memeIsX && dlmm.tokenY.publicKey.toBase58() !== mint) throw new Error("pool does not hold this mint");
+    if (other !== SOL_MINT) throw new Error("pool has no SOL side");
+    const swapForY = memeIsX;
+    const bins = await dlmm.getBinArrayForSwap(swapForY, 4);
+    const quote = dlmm.swapQuote(new BN(amount.toString()), swapForY, new BN(5_000), bins, true);
+    if (!quote.outAmount || quote.outAmount.lten(0)) throw new Error("dlmm quote was empty");
+    const inAmount = quote.consumedInAmount?.gtn(0) ? quote.consumedInAmount : new BN(amount.toString());
+    const minOut = quote.minOutAmount?.gtn(0) ? quote.minOutAmount : new BN(1);
+    const tx = await dlmm.swap({
+      inToken: new PublicKey(mint),
+      outToken: new PublicKey(SOL_MINT),
+      inAmount,
+      minOutAmount: minOut,
+      lbPair: dlmm.pubkey,
+      user: this.wallet.publicKey,
+      binArraysPubkey: quote.binArraysPubkey,
+    });
+    const signature = await sendAndConfirmTransaction(this.connection, tx, [this.wallet]);
+    console.log(`[swap] meme back to SOL via pool sig=${signature}`);
+  }
+
+  /** Jupiter has no route for a few raw units. Burn those and close the account. A real bag stays. */
+  private async burnDust(mint: string): Promise<void> {
+    const bags = (await this.tokenBags()).filter((bag) => bag.mint === mint && bag.amount > 0n && bag.amount <= DUST_RAW);
+    if (!bags.length) throw new Error("leftover is above dust and was not swapped");
+    for (const bag of bags) {
+      const program = new PublicKey(bag.program);
+      const account = new PublicKey(bag.account);
+      const mintPk = new PublicKey(mint);
+      const burn = createBurnInstruction(account, mintPk, this.wallet.publicKey, bag.amount, [], program);
+      const close = createCloseAccountInstruction(account, this.wallet.publicKey, this.wallet.publicKey, [], program);
+      const tx = new Transaction().add(burn, close);
+      try {
+        const signature = await sendAndConfirmTransaction(this.connection, tx, [this.wallet]);
+        console.log(`[swap] closed unsellable dust raw=${bag.amount} sig=${signature}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "dust close failed";
+        throw new Error(`unsellable dust was not closed (${msg})`);
+      }
+    }
+  }
+
+  private async tokenBags(): Promise<TokenBag[]> {
+    const bags: TokenBag[] = [];
+    const seen = new Set<string>();
+    for (const programId of TOKEN_PROGRAMS) {
+      const accounts = await this.connection.getParsedTokenAccountsByOwner(this.wallet.publicKey, { programId });
+      for (const acc of accounts.value) {
+        const key = acc.pubkey.toBase58();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const info = (acc.account.data as {
+          parsed?: { info?: { mint?: string; tokenAmount?: { amount?: string } } };
+        }).parsed?.info;
+        const mint = info?.mint ?? "";
+        const amount = BigInt(info?.tokenAmount?.amount ?? "0");
+        if (!mint || mint === SOL_MINT || amount <= 0n) continue;
+        bags.push({
+          account: key,
+          program: acc.account.owner.toBase58(),
+          mint,
+          amount,
+        });
+      }
+    }
+    return bags;
   }
 
   private async rawBalance(mint: string): Promise<bigint> {
     const mintPk = new PublicKey(mint);
     let total = 0n;
+    const seen = new Set<string>();
     for (const programId of TOKEN_PROGRAMS) {
       const accounts = await this.connection.getParsedTokenAccountsByOwner(this.wallet.publicKey, {
         mint: mintPk,
         programId,
       });
       for (const acc of accounts.value) {
+        // Helius returns the same account for both token programs when a mint is set.
+        const key = acc.pubkey.toBase58();
+        if (seen.has(key)) continue;
+        seen.add(key);
         const parsed = acc.account.data as { parsed?: { info?: { tokenAmount?: { amount?: string } } } };
         const amount = parsed.parsed?.info?.tokenAmount?.amount ?? "0";
         total += BigInt(amount);
@@ -216,34 +465,10 @@ export class DlmmExecutor {
     }
     return total;
   }
+}
 
-  private async swapSolForMeme(outputMint: string, lamports: number): Promise<{ gained: bigint }> {
-    const before = await this.rawBalance(outputMint);
-    const built = await buildJupiterSwap({
-      inputMint: SOL_MINT,
-      outputMint,
-      amount: lamports,
-      userPublicKey: this.wallet.publicKey.toBase58(),
-    });
-    const tx = VersionedTransaction.deserialize(Buffer.from(built.swapTransaction, "base64"));
-    tx.sign([this.wallet]);
-    const signature = await this.connection.sendRawTransaction(tx.serialize(), { maxRetries: 3 });
-    const height = built.lastValidBlockHeight;
-    if (height > 0) {
-      const result = await this.connection.confirmTransaction(
-        { signature, blockhash: tx.message.recentBlockhash, lastValidBlockHeight: height },
-        "confirmed",
-      );
-      if (result.value.err) throw new Error("swap transaction failed");
-    } else {
-      const result = await this.connection.confirmTransaction(signature, "confirmed");
-      if (result.value.err) throw new Error("swap transaction failed");
-    }
-    const gained = (await this.rawBalance(outputMint)) - before;
-    if (gained <= 0n) throw new Error("swap landed without the meme token");
-    console.log(`[swap] ${outputMint.slice(0, 4)}… gained raw tokens sig=${signature}`);
-    return { gained };
-  }
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export async function enterPositionDryRun(

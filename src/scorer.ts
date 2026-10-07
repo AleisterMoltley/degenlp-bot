@@ -1,5 +1,5 @@
 import { config } from "./config.js";
-import { bankableUsd, chooseShape, feeHeat, quoteEdge } from "./edge.js";
+import { bankableUsd, chooseShape, feeHeat, quoteEdge, trailGaveBack } from "./edge.js";
 import { inBand, markIlUsd } from "./pnl.js";
 import type { ActivePosition, BotDecision, OpportunityCheck, PoolCandidate } from "./types.js";
 
@@ -364,6 +364,22 @@ export function planPosition(args: {
   }
 
   const solPx = current.pool.solPrice || active.solPrice || 0;
+  if (
+    trailGaveBack({
+      bankableUsd: bankable,
+      peakNetUsd: active.peakNetUsd ?? bankable,
+      deployUsd,
+      startPct: config.trailStartPct,
+      dropPct: config.trailDropPct,
+    })
+  ) {
+    return {
+      action: "exit",
+      pool: current.pool,
+      metrics: current.metrics,
+      reason: "trail gave back the run",
+    };
+  }
   if (args.lossCut && args.lossCut > 0 && solPx > 0 && active.solDeployed > 0 && held > 20_000) {
     const openSol = (active.feesAccruedUsd - liveIl - active.costsUsd) / solPx;
     if (openSol <= -args.lossCut * active.solDeployed) {
