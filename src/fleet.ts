@@ -1,8 +1,8 @@
 import { chopShapeOk, depthOk } from "./chop.js";
 import { config } from "./config.js";
-import { bankableUsd, collectedFeePct, trailGaveBack } from "./edge.js";
+import { bankableUsd, collectedFeePct, feeHeat, trailGaveBack } from "./edge.js";
 import { halfWidthFromBins, markIlUsd, oneBinBidIl } from "./pnl.js";
-import { bidLeftBehind, binsAboveEntry, filledShouldSell, MAX_BID_SLIDES, MAX_SOL_HOP_BINS } from "./fillwatch.js";
+import { bidLeftBehind, binsAboveEntry, filledSellClears, filledShouldSell, MAX_BID_SLIDES, MAX_SOL_HOP_BINS } from "./fillwatch.js";
 import { feePerBin, feeRateClears, microChopOk } from "./travel.js";
 import { computeMetrics, planPosition, rankPools, type Metrics } from "./scorer.js";
 import type { ActivePosition, BotDecision, PoolCandidate } from "./types.js";
@@ -442,6 +442,36 @@ export function chopStillPays(pool: PoolCandidate): boolean {
 }
 
 /** A slide spends two transactions, so it needs a tape that is still reversing. A missing tape does not. */
+/** A chop that just died is not a close. The seat keeps the bin through this dwell. */
+export const CHOP_DWELL_MS = 3 * 60_000;
+
+/**
+ * True when the chop has been dead for the dwell.
+ * The first dead print stamps the seat and waits, so one bad shape does not
+ * pay a close and lock the pool. A live chop clears the stamp.
+ */
+export function chopDeadAged(seat: ActivePosition, pool: PoolCandidate, now: number): boolean {
+  if (chopStillPays(pool)) {
+    seat.chopDeadSince = undefined;
+    return false;
+  }
+  if (!(seat.chopDeadSince && seat.chopDeadSince > 0)) {
+    seat.chopDeadSince = now;
+    return false;
+  }
+  return now - seat.chopDeadSince >= CHOP_DWELL_MS;
+}
+
+/**
+ * The seat is still in a bin the catalog would keep.
+ * Flat or hot 30-minute fees are that bin. A cooled tape, or a print under
+ * the entry gate, is not.
+ */
+export function feeStillPrinting(pool: PoolCandidate): boolean {
+  if (!(pool.fee30mUsd >= config.minFee30mUsd)) return false;
+  return feeHeat(pool) !== "cool";
+}
+
 export function chopConfirmed(pool: PoolCandidate): boolean {
   const priceReady = (pool.chopSamples ?? 0) >= 4;
   const binReady = (pool.binTapeSamples ?? 0) >= 8 && (pool.binTapeSpanMs ?? 0) >= 45_000;
@@ -571,10 +601,12 @@ export function planFleet(args: {
     const drop = dropOf(pool, args.moves);
     const fast = drop >= Math.max(step, 0.01);
     const oneBinSkim = isSkim(seat) && seat.minBinId === seat.maxBinId && seat.entryPrice > 0;
+    if (oneBinSkim && chopStillPays(pool)) seat.chopDeadSince = undefined;
     // Fees are paid by the bin a swap consumes. A SOL bid earns when a sell
     // walks into it. One bin away, that walk is the leftover after the active
-    // bin. Two bins, a dead chop, or a third chase leaves. Closing on the
-    // first return to SOL would miss the next sell.
+    // bin. A chop that just died keeps the seat through the dwell. A runner
+    // several bins away leaves. Closing on the first return to SOL would miss
+    // the next sell.
     const binStep = seat.binStep || pool.binStep || 80;
     // The buy paid the ask, or a lift finished as SOL. The liquidity sits at
     // askPrice. Anchor the bid there so the old entry does not close it as a runner.
@@ -593,12 +625,14 @@ export function planFleet(args: {
     if (oneBinSkim && seat.pose === "ask") {
       const anchor = seat.askPrice && seat.askPrice > 0 ? seat.askPrice : seat.entryPrice;
       const fromAsk = binsAboveEntry(price, anchor, binStep);
-      if (Math.abs(fromAsk) < 1 - 1e-6 && !chopStillPays(pool)) {
+      // In the bin, the next buy still pays. A dead shape leaves only once the
+      // fee tape has cooled and stayed dead through the dwell.
+      if (
+        Math.abs(fromAsk) < 1 - 1e-6 &&
+        !feeStillPrinting(pool) &&
+        chopDeadAged(seat, pool, args.now)
+      ) {
         closes.push({ id: seat.id, action: "exit", reason: "chop ended" });
-        continue;
-      }
-      if (fromAsk <= -2 + 1e-6 && !chopStillPays(pool)) {
-        closes.push({ id: seat.id, action: "exit", reason: "ask left behind" });
         continue;
       }
       if (
@@ -613,15 +647,16 @@ export function planFleet(args: {
           boardDown: args.boardDown === true,
         })
       ) {
-        closes.push({ id: seat.id, action: "exit", reason: "scratched the fill" });
-        continue;
-      }
-      if (!chopStillPays(pool) && Math.abs(fromAsk) >= 2 - 1e-6) {
-        closes.push({ id: seat.id, action: "exit", reason: "ask left behind" });
-        continue;
+        const deadOnly = !chopStillPays(pool) && args.boardDown !== true;
+        if (!deadOnly || chopDeadAged(seat, pool, args.now)) {
+          closes.push({ id: seat.id, action: "exit", reason: "scratched the fill" });
+          continue;
+        }
       }
       // The ask is under the price again. Climb while the next buy still clears.
-      // After a few climbs the seat stops chasing.
+      // After a few climbs the seat stops chasing. A dead chop cannot climb, so
+      // it leaves once the dwell is done. A dip inside the unwind is not a close:
+      // the market sell would lock the slippage and skip the buy.
       if (fromAsk >= 2 - 1e-6) {
         const kind = inPoolSwitch({
           pool,
@@ -640,7 +675,7 @@ export function planFleet(args: {
           });
           continue;
         }
-        if ((seat.switches ?? 0) >= MAX_BID_SLIDES) {
+        if ((seat.switches ?? 0) >= MAX_BID_SLIDES || chopDeadAged(seat, pool, args.now)) {
           closes.push({ id: seat.id, action: "exit", reason: "ask left behind" });
           continue;
         }
@@ -672,10 +707,11 @@ export function planFleet(args: {
     }
     // A fill under the bin is meme. Selling it locks the dip. The way back
     // through the bin pays the fee and clears the mark. A live chop waits.
-    // A dead chop, or a board falling together, sells once the dip is past
-    // the unwind, where a market sell is no longer larger than the move.
+    // A chop that just died waits out the dwell. A board falling together
+    // sells once the dip is past the unwind.
     if (oneBinSkim && seat.filled === true) {
       const binsDown = -binsAboveEntry(price, seat.entryPrice, binStep);
+      const board = args.boardDown === true;
       if (
         binsDown > 1 &&
         filledShouldSell({
@@ -685,43 +721,57 @@ export function planFleet(args: {
           feePct: collectedFeePct(pool),
           chopAlive: chopStillPays(pool),
           direction: "down",
-          boardDown: args.boardDown === true,
+          boardDown: board,
         })
       ) {
-        closes.push({ id: seat.id, action: "exit", reason: "scratched the fill" });
-        continue;
+        const deadOnly = !chopStillPays(pool) && !board;
+        if (!deadOnly || chopDeadAged(seat, pool, args.now)) {
+          closes.push({ id: seat.id, action: "exit", reason: "scratched the fill" });
+          continue;
+        }
       }
     }
     // A filled seat does not slide. Inside the unwind a market sell locks
     // slippage. Past it, the seat stays while the chop can still pay the fee
-    // on the way back, and leaves once the move beats that fee or the chop dies.
+    // on the way back. It leaves once the move beats that fee. A dead chop
+    // leaves only after the dwell, so one bad print does not sell the fill.
     if (oneBinSkim && seat.filled === true && bidLeftBehind(price, seat.entryPrice, binStep)) {
       const binsUp = binsAboveEntry(price, seat.entryPrice, binStep);
+      const alive = chopStillPays(pool);
       if (
         filledShouldSell({
           binsUp,
           binStep,
           unwindBps: UNWIND_BPS,
           feePct: collectedFeePct(pool),
-          chopAlive: chopStillPays(pool),
+          chopAlive: alive,
         })
       ) {
-        closes.push({ id: seat.id, action: "exit", reason: "bid left behind" });
-        continue;
+        const beats = filledSellClears(binsUp, binStep, UNWIND_BPS, collectedFeePct(pool));
+        const deadOnly = !beats && !alive;
+        if (!deadOnly || chopDeadAged(seat, pool, args.now)) {
+          closes.push({ id: seat.id, action: "exit", reason: "bid left behind" });
+          continue;
+        }
       }
     }
     // Still SOL, off the bin. One bin above stays when the next minute of
     // selling already reaches it, and steps onto the active bin when the share
-    // clears the two transactions. Two bins costs the same hop when that share
-    // clears. Farther is a runner. One bin below does not step down.
+    // clears the two transactions. Two bins hops when that share clears, and
+    // waits when it does not. A dead chop waits out the dwell. Farther is a
+    // runner. One bin below does not step down.
     if (oneBinSkim && seat.filled !== true) {
       const binsUp = binsAboveEntry(price, seat.entryPrice, binStep);
       const binsAway = Math.abs(binsUp);
       const slidesUsed = seat.slides ?? 0;
       if (binsAway >= 1 - 1e-6) {
         const solPx = pool.solPrice || seat.solPrice || 0;
-        const tired = slidesUsed >= MAX_BID_SLIDES || !chopStillPays(pool);
-        if (binsUp <= -2 + 1e-6 || tired) {
+        const runner = binsUp >= MAX_SOL_HOP_BINS + 1 - 1e-6 || binsUp <= -(MAX_SOL_HOP_BINS + 1) + 1e-6;
+        // One bin away is still where a sell can reach. Keep it while the fee
+        // tape is flat or hot. Two bins is no longer our bin.
+        const near = binsAway < 2 - 1e-6;
+        const dwellExit = (runner || !near || !feeStillPrinting(pool)) && chopDeadAged(seat, pool, args.now);
+        if (runner || dwellExit) {
           closes.push({ id: seat.id, action: "exit", reason: "bid left behind" });
           continue;
         }
@@ -731,14 +781,11 @@ export function planFleet(args: {
         }
         const hop =
           binsUp < MAX_SOL_HOP_BINS + 1 - 1e-6 &&
+          slidesUsed < MAX_BID_SLIDES &&
           chopConfirmed(pool) &&
           offBinSlidePays(pool, seat.solDeployed * solPx, config.txCostUsd, config.minEdgeUsd);
         if (hop) {
           slides.push({ id: seat.id, reason: "slide the SOL bid into the active bin" });
-          continue;
-        }
-        if (binsUp >= 2 - 1e-6) {
-          closes.push({ id: seat.id, action: "exit", reason: "bid left behind" });
           continue;
         }
         holds.push({ id: seat.id, reason: "waiting for the bin" });
@@ -746,15 +793,18 @@ export function planFleet(args: {
       }
     }
     // Still inside the fee bin. At or above the entry the bid is earning, and
-    // a dip smaller than one bin is the same bin: a dead chop leaves, a live
-    // chop is not thrown out by the clock, and the dip does not scale.
+    // a dip smaller than one bin is the same bin. A live chop stays. A dead
+    // chop stays through the dwell. The clock does not throw out a live chop,
+    // and the dip does not scale.
     const binsAwayNow = Math.abs(binsAboveEntry(price, seat.entryPrice, binStep));
     if (oneBinSkim && !seat.filled && (price >= seat.entryPrice || binsAwayNow < 1 - 1e-6)) {
       const priceReady = (pool.chopSamples ?? 0) >= 4;
       const binReady = (pool.binTapeSamples ?? 0) >= 8 && (pool.binTapeSpanMs ?? 0) >= 45_000;
       const since = seat.slidAt ?? seat.enteredAt;
-      const tapeGone = !priceReady && !binReady && args.now - since >= 3 * 60_000;
-      if (tapeGone || !chopStillPays(pool)) {
+      const tapeGone = !priceReady && !binReady && args.now - since >= CHOP_DWELL_MS;
+      // Still in the bin. A dead shape keeps earning while the fee tape is
+      // flat or hot. It leaves once that tape cools and the dwell has passed.
+      if (tapeGone || (!feeStillPrinting(pool) && chopDeadAged(seat, pool, args.now))) {
         closes.push({ id: seat.id, action: "exit", reason: "chop ended" });
         continue;
       }

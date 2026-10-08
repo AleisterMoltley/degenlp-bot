@@ -81,6 +81,8 @@ export interface ActivePosition {
   slides?: number;
   /** When the bid last stepped up. The unfilled window counts from here. */
   slidAt?: number;
+  /** When this seat first saw the chop go dead. A close waits out the dwell. */
+  chopDeadSince?: number;
   exitReason?: string;
   exitedAt?: number;
 }

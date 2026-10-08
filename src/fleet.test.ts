@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { quoteEdge } from "./edge.js";
-import { coolsOff, downwardMove, offBinSlidePays, planFleet, seatCeilingSol, SEAT_FLOOR_USD, skimFillFraction } from "./fleet.js";
+import { CHOP_DWELL_MS, coolsOff, downwardMove, feeStillPrinting, offBinSlidePays, planFleet, seatCeilingSol, SEAT_FLOOR_USD, skimFillFraction } from "./fleet.js";
 import { halfWidthFromBins } from "./pnl.js";
 import type { ActivePosition, PoolCandidate } from "./types.js";
 
@@ -167,9 +167,18 @@ test("a one-bin fill is scratched and a smaller dip is not", () => {
   assert.equal(heldDown.closes.length, 0, heldDown.closes.map((row) => row.reason).join(","));
   assert.match(heldDown.holds[0]?.reason ?? "", /round trip/);
 
-  const scratch = planFleet({
+  const freshScratch = planFleet({
     pools: [pool({ priceUsd: 0.92, chopCrossings: 0, chopNetBins: 6 })],
     seats: [seat({ enteredAt: now - 10_000, filled: true })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(freshScratch.closes.length, 0, freshScratch.closes.map((row) => row.reason).join(","));
+  assert.match(freshScratch.holds[0]?.reason ?? "", /round trip/);
+
+  const scratch = planFleet({
+    pools: [pool({ priceUsd: 0.92, chopCrossings: 0, chopNetBins: 6 })],
+    seats: [seat({ enteredAt: now - 10_000, filled: true, chopDeadSince: now - CHOP_DWELL_MS })],
     deploySol: 0.72,
     now,
   });
@@ -183,7 +192,8 @@ test("a one-bin fill is scratched and a smaller dip is not", () => {
     now,
   });
   assert.equal(unfilled.slides.length, 0);
-  assert.equal(unfilled.closes[0]?.reason, "bid left behind");
+  assert.equal(unfilled.closes.length, 0, unfilled.closes.map((row) => row.reason).join(","));
+  assert.match(unfilled.holds[0]?.reason ?? "", /waiting for the bin/);
 
   const dip = planFleet({
     pools: [pool({ priceUsd: 0.995 })],
@@ -268,7 +278,45 @@ test("a SOL seat in the fee bin stays past the window, and a dip that never retu
     now,
   });
   assert.equal(deadDip.slides.length, 0);
-  assert.equal(deadDip.closes[0]?.reason, "bid left behind");
+  assert.equal(deadDip.closes.length, 0, deadDip.closes.map((row) => row.reason).join(","));
+  assert.match(deadDip.holds[0]?.reason ?? "", /waiting for the bin/);
+
+  const agedPaying = planFleet({
+    pools: [pool({ priceUsd: 0.99, chopCrossings: 0, chopNetBins: 6 })],
+    seats: [
+      seat({
+        feesAccruedUsd: 0,
+        enteredAt: now - 9 * 60_000,
+        entryPrice: 1,
+        lastPrice: 0.99,
+        binStep: 100,
+        chopDeadSince: now - CHOP_DWELL_MS,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(agedPaying.slides.length, 0);
+  assert.equal(agedPaying.closes.length, 0, agedPaying.closes.map((row) => row.reason).join(","));
+  assert.match(agedPaying.holds[0]?.reason ?? "", /waiting for the bin/);
+
+  const agedDip = planFleet({
+    pools: [pool({ priceUsd: 0.99, chopCrossings: 0, chopNetBins: 6, fee30mUsd: 400, fee1hUsd: 1_800 })],
+    seats: [
+      seat({
+        feesAccruedUsd: 0,
+        enteredAt: now - 9 * 60_000,
+        entryPrice: 1,
+        lastPrice: 0.99,
+        binStep: 100,
+        chopDeadSince: now - CHOP_DWELL_MS,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(agedDip.slides.length, 0);
+  assert.equal(agedDip.closes[0]?.reason, "bid left behind");
 
   const shy = planFleet({
     pools: [pool({ priceUsd: 0.995 })],
@@ -831,7 +879,26 @@ test("a fill inside the bid waits, and the way back to SOL stays", () => {
     deploySol: 0.72,
     now,
   });
-  assert.equal(filledDead.closes[0]?.reason, "bid left behind");
+  assert.equal(filledDead.closes.length, 0, filledDead.closes.map((row) => row.reason).join(","));
+  assert.match(filledDead.holds[0]?.reason ?? "", /round trip/);
+
+  const filledDeadAged = planFleet({
+    pools: [pool({ priceUsd: 1.05, chopCrossings: 0, chopNetBins: 6 })],
+    seats: [
+      seat({
+        filled: true,
+        touched: true,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.05,
+        binStep: 100,
+        chopDeadSince: now - CHOP_DWELL_MS,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(filledDeadAged.closes[0]?.reason, "bid left behind");
 
   const filledFar = planFleet({
     pools: [pool({ priceUsd: 1.08 })],
@@ -884,7 +951,8 @@ test("a fill inside the bid waits, and the way back to SOL stays", () => {
     now,
   });
   assert.equal(ran.slides.length, 0);
-  assert.equal(ran.closes[0]?.reason, "bid left behind");
+  assert.equal(ran.closes.length, 0, ran.closes.map((row) => row.reason).join(","));
+  assert.match(ran.holds[0]?.reason ?? "", /waiting for the bin/);
 
   const runner = planFleet({
     pools: [pool({ priceUsd: 1.05 })],
@@ -921,7 +989,8 @@ test("a fill inside the bid waits, and the way back to SOL stays", () => {
     now,
   });
   assert.equal(tired.slides.length, 0);
-  assert.equal(tired.closes[0]?.reason, "bid left behind");
+  assert.equal(tired.closes.length, 0, tired.closes.map((row) => row.reason).join(","));
+  assert.match(tired.holds[0]?.reason ?? "", /waiting for the bin/);
 
   const deadUp = planFleet({
     pools: [pool({ priceUsd: 1.02, chopSamples: 8, chopCrossings: 0, chopNetBins: 6 })],
@@ -939,7 +1008,27 @@ test("a fill inside the bid waits, and the way back to SOL stays", () => {
     now,
   });
   assert.equal(deadUp.slides.length, 0);
-  assert.equal(deadUp.closes[0]?.reason, "bid left behind");
+  assert.equal(deadUp.closes.length, 0, deadUp.closes.map((row) => row.reason).join(","));
+  assert.match(deadUp.holds[0]?.reason ?? "", /waiting for the bin/);
+
+  const deadUpAged = planFleet({
+    pools: [pool({ priceUsd: 1.02, chopSamples: 8, chopCrossings: 0, chopNetBins: 6 })],
+    seats: [
+      seat({
+        filled: false,
+        touched: true,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.02,
+        binStep: 100,
+        chopDeadSince: now - CHOP_DWELL_MS,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(deadUpAged.slides.length, 0);
+  assert.equal(deadUpAged.closes[0]?.reason, "bid left behind");
 
   const dead = planFleet({
     pools: [pool({ priceUsd: 1, chopSamples: 8, chopCrossings: 0, chopNetBins: 6 })],
@@ -956,8 +1045,46 @@ test("a fill inside the bid waits, and the way back to SOL stays", () => {
     deploySol: 0.72,
     now,
   });
-  assert.equal(dead.closes.length, 1);
-  assert.equal(dead.closes[0].reason, "chop ended");
+  assert.equal(dead.closes.length, 0, dead.closes.map((row) => row.reason).join(","));
+  assert.match(dead.holds[0]?.reason ?? "", /earning|SOL again/);
+
+  const deadAged = planFleet({
+    pools: [pool({ priceUsd: 1, chopSamples: 8, chopCrossings: 0, chopNetBins: 6 })],
+    seats: [
+      seat({
+        filled: false,
+        touched: true,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1,
+        binStep: 100,
+        chopDeadSince: now - CHOP_DWELL_MS,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(deadAged.closes.length, 0, deadAged.closes.map((row) => row.reason).join(","));
+  assert.match(deadAged.holds[0]?.reason ?? "", /earning|SOL again/);
+
+  const deadCooled = planFleet({
+    pools: [pool({ priceUsd: 1, chopSamples: 8, chopCrossings: 0, chopNetBins: 6, fee30mUsd: 400, fee1hUsd: 1_800 })],
+    seats: [
+      seat({
+        filled: false,
+        touched: true,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1,
+        binStep: 100,
+        chopDeadSince: now - CHOP_DWELL_MS,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(deadCooled.closes.length, 1);
+  assert.equal(deadCooled.closes[0].reason, "chop ended");
 
   const blind = planFleet({
     pools: [pool({ priceUsd: 1, chopSamples: 0, chopCrossings: 0, chopNetBins: 0, binTapeSamples: 0, binTapeSpanMs: 0 })],
@@ -975,6 +1102,13 @@ test("a fill inside the bid waits, and the way back to SOL stays", () => {
     now,
   });
   assert.equal(blind.closes[0]?.reason, "chop ended");
+});
+
+test("a flat fee tape is still printing and a cooled tape is not", () => {
+  assert.equal(feeStillPrinting(pool()), true);
+  assert.equal(feeStillPrinting(paying()), true);
+  assert.equal(feeStillPrinting(pool({ fee30mUsd: 400, fee1hUsd: 1_800 })), false);
+  assert.equal(feeStillPrinting(pool({ fee30mUsd: 10, fee1hUsd: 20 })), false);
 });
 
 test("a deep bin is worth one slide and a bin the sell already reaches is not", () => {
@@ -1075,7 +1209,8 @@ test("a deep bin is worth one slide and a bin the sell already reaches is not", 
     now,
   });
   assert.equal(chased.slides.length, 0);
-  assert.equal(chased.closes[0]?.reason, "bid left behind");
+  assert.equal(chased.closes.length, 0, chased.closes.map((row) => row.reason).join(","));
+  assert.match(chased.holds[0]?.reason ?? "", /waiting for the bin/);
 
   const down = planFleet({
     pools: [pool({ priceUsd: 0.99 })],
@@ -1223,7 +1358,7 @@ test("a shock pause opens nothing and still scratches a fill", () => {
 
   const scratch = planFleet({
     pools: [pool({ priceUsd: 0.92, chopCrossings: 0, chopNetBins: 6 })],
-    seats: [seat({ enteredAt: now - 10_000, filled: true })],
+    seats: [seat({ enteredAt: now - 10_000, filled: true, chopDeadSince: now - CHOP_DWELL_MS })],
     deploySol: 0.72,
     now,
     freezeOpens: true,
@@ -1432,12 +1567,21 @@ test("a filled seat can switch onto the active bin, and only upward", () => {
 
   const stranded = planFleet({
     pools: [pool({ priceUsd: 0.92, chopCrossings: 0, chopNetBins: 6 })],
-    seats: [seat({ ...filled, pose: "ask", askPrice: 1.08, switches: 1 })],
+    seats: [seat({ ...filled, pose: "ask", askPrice: 1.08, switches: 1, chopDeadSince: now - CHOP_DWELL_MS })],
     deploySol: 0.72,
     now,
   });
   assert.equal(stranded.switches.length, 0);
-  assert.equal(stranded.closes[0]?.reason, "ask left behind");
+  assert.equal(stranded.closes[0]?.reason, "scratched the fill");
+
+  const insideUnwind = planFleet({
+    pools: [pool({ priceUsd: 1.057, chopCrossings: 0, chopNetBins: 6 })],
+    seats: [seat({ ...filled, pose: "ask", askPrice: 1.08, switches: 1, chopDeadSince: now - CHOP_DWELL_MS })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(insideUnwind.closes.length, 0, insideUnwind.closes.map((row) => row.reason).join(","));
+  assert.match(insideUnwind.holds[0]?.reason ?? "", /ask waits/);
 
   const partial = planFleet({
     pools: [pool({ priceUsd: 1.08 })],

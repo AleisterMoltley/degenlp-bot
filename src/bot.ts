@@ -2,7 +2,7 @@ import { buildCandidates, fetchOriginalOpportunityChecks, fetchTopPumpTokens } f
 import { config } from "./config.js";
 import { bankableUsd, collectedFeePct, depthReadRank } from "./edge.js";
 import { chopFromPrices } from "./chop.js";
-import { bidCycle, filledShouldSell, MAX_BID_SLIDES, MAX_SOL_HOP_BINS, scratchNow } from "./fillwatch.js";
+import { bidCycle, filledSellClears, filledShouldSell, MAX_BID_SLIDES, MAX_SOL_HOP_BINS, scratchNow } from "./fillwatch.js";
 import { binTapeFromIds, feeRateClears, mintShouldSleep, priceBinId } from "./travel.js";
 import { deploySolFor, equitySol, paceSol } from "./growth.js";
 import { DlmmExecutor, DUST_RAW, enterPositionDryRun } from "./executor.js";
@@ -12,7 +12,7 @@ import { mergeWatched, watchedMemePools } from "./watched.js";
 import { accrueFees, entryCostUsd, fillShare, markIlUsd, oneBinBidIl, priceBand } from "./pnl.js";
 import { hydratePosition } from "./position.js";
 import { measureRpcLatency, ProofNetworkTelemetry } from "./proofnetwork.js";
-import { chopConfirmed, chopStillPays, inPoolSwitch, offBinSlidePays, planFleet, coolsOff, downwardMove, type FleetOpen, type FleetPlan } from "./fleet.js";
+import { chopConfirmed, chopDeadAged, chopStillPays, inPoolSwitch, offBinSlidePays, planFleet, coolsOff, downwardMove, type FleetOpen, type FleetPlan } from "./fleet.js";
 import { depositFloorLamports } from "./jupiter.js";
 import { decide, planToCheck, type Plan } from "./scorer.js";
 import { ensureGrowth, loadState, saveState, type BotState, type GrowthLedger } from "./state.js";
@@ -928,9 +928,23 @@ export class DegenLpBot {
       if (cycle === "scratch" && seat.filled !== true) {
         // One bin under and still SOL. Stepping down spends two transactions
         // to become the bag. The sell has to walk back up into this bid.
+        // Two bins with a live chop waits. Three bins is a runner.
+        const binsDown = seat.minBinId - activeId;
         if (!scratchNow(activeId, seat.minBinId)) {
           seat.touched = true;
           console.log(`[fill] ${seat.poolName} waits under bin ${seat.maxBinId} active ${activeId}`);
+          continue;
+        }
+        const pool = this.lastPools.find((row) => row.poolAddress === poolAddress);
+        const runner = binsDown > MAX_SOL_HOP_BINS;
+        if (!runner && pool && chopStillPays(pool)) {
+          seat.touched = true;
+          console.log(`[fill] ${seat.poolName} waits under bin ${seat.maxBinId} active ${activeId}`);
+          continue;
+        }
+        if (!runner && pool && !chopDeadAged(seat, pool, Date.now())) {
+          seat.touched = true;
+          console.log(`[fill] ${seat.poolName} chop dwell under bin ${seat.maxBinId} active ${activeId}`);
           continue;
         }
         console.log(`[fill] ${seat.poolName} bid left behind bin ${seat.maxBinId} active ${activeId}`);
@@ -941,6 +955,7 @@ export class DegenLpBot {
         const binsDown = seat.minBinId - activeId;
         const pool = this.lastPools.find((row) => row.poolAddress === poolAddress);
         const unwind = Math.max(config.swapBps, 300);
+        const board = this.boardIsDown(this.lastPools, Date.now());
         if (
           !filledShouldSell({
             binsUp: binsDown,
@@ -951,21 +966,40 @@ export class DegenLpBot {
             // sells; inside it the same check still waits.
             chopAlive: pool ? chopStillPays(pool) : false,
             direction: "down",
-            boardDown: this.boardIsDown(this.lastPools, Date.now()),
+            boardDown: board,
           })
         ) {
           seat.touched = true;
           console.log(`[fill] ${seat.poolName} meme waits under bin ${seat.maxBinId} active ${activeId}`);
           continue;
         }
+        const deadOnly = !(pool && chopStillPays(pool)) && !board;
+        if (deadOnly && pool && !chopDeadAged(seat, pool, Date.now())) {
+          seat.touched = true;
+          console.log(`[fill] ${seat.poolName} chop dwell under bin ${seat.maxBinId} active ${activeId}`);
+          continue;
+        }
       }
       if (cycle === "leave" && seat.filled !== true) {
         // Two bins above and still SOL. The hop costs the same as one bin and
-        // lands on the bin the next sell pays. Farther than that leaves.
+        // lands on the bin the next sell pays. A live chop inside that hop
+        // waits when the share does not clear. Farther than that leaves.
         const binsUp = activeId - seat.maxBinId;
         if (binsUp === MAX_SOL_HOP_BINS) {
           const slid = await this.maybeSlideToActive(seat);
           if (slid) continue;
+        }
+        const pool = this.lastPools.find((row) => row.poolAddress === poolAddress);
+        const runner = binsUp > MAX_SOL_HOP_BINS;
+        if (!runner && pool && chopStillPays(pool)) {
+          seat.touched = true;
+          console.log(`[fill] ${seat.poolName} waits above bin ${seat.maxBinId} active ${activeId}`);
+          continue;
+        }
+        if (!runner && pool && !chopDeadAged(seat, pool, Date.now())) {
+          seat.touched = true;
+          console.log(`[fill] ${seat.poolName} chop dwell above bin ${seat.maxBinId} active ${activeId}`);
+          continue;
         }
         console.log(`[fill] ${seat.poolName} bid left behind bin ${seat.maxBinId} active ${activeId}`);
         await this.closeSeat(seat, "bid left behind", "exit");
@@ -981,6 +1015,11 @@ export class DegenLpBot {
           console.log(`[fill] ${seat.poolName} ask waits above bin ${seat.maxBinId} active ${activeId}`);
           continue;
         }
+        if (pool && !chopStillPays(pool) && !chopDeadAged(seat, pool, Date.now())) {
+          seat.touched = true;
+          console.log(`[fill] ${seat.poolName} ask dwell above bin ${seat.maxBinId} active ${activeId}`);
+          continue;
+        }
         console.log(`[fill] ${seat.poolName} ask left behind bin ${seat.maxBinId} active ${activeId}`);
         await this.closeSeat(seat, "ask left behind", "exit");
         continue;
@@ -991,17 +1030,25 @@ export class DegenLpBot {
         const binsUp = activeId - seat.maxBinId;
         const pool = this.lastPools.find((row) => row.poolAddress === poolAddress);
         const unwind = Math.max(config.swapBps, 300);
+        const feePct = pool ? collectedFeePct(pool) : 0;
+        const alive = pool ? chopStillPays(pool) : true;
         if (
           !filledShouldSell({
             binsUp,
             binStep: seat.binStep || 80,
             unwindBps: unwind,
-            feePct: pool ? collectedFeePct(pool) : 0,
-            chopAlive: pool ? chopStillPays(pool) : true,
+            feePct,
+            chopAlive: alive,
           })
         ) {
           seat.touched = true;
           console.log(`[fill] ${seat.poolName} meme waits in bin ${seat.maxBinId} active ${activeId}`);
+          continue;
+        }
+        const beats = filledSellClears(binsUp, seat.binStep || 80, unwind, feePct);
+        if (!beats && !alive && pool && !chopDeadAged(seat, pool, Date.now())) {
+          seat.touched = true;
+          console.log(`[fill] ${seat.poolName} chop dwell in bin ${seat.maxBinId} active ${activeId}`);
           continue;
         }
       }
