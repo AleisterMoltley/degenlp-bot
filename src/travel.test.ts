@@ -24,6 +24,15 @@ test("a reversing bin tape is a seat and a jump is not", () => {
   assert.equal(flat.maxStep, 0);
   assert.equal(flat.netBins, 0);
   assert.equal(microChopOk(flat), true);
+  assert.equal(flat.lastStep, 0);
+  assert.equal(chop.lastStep, 1);
+  const down = binTapeFromIds(
+    [1, 0, 1, 0, 1, 0, 1, 0].map((id, i) => ({ at: now - 50_000 + i * 7_000, id })),
+    now,
+    60_000,
+  );
+  assert.equal(down.lastStep, -1);
+  assert.equal(microChopOk(down), true);
   const oneWay = binTapeFromIds(
     [0, 0, 0, 0, 1, 1, 1, 1].map((id, i) => ({ at: now - 50_000 + i * 7_000, id })),
     now,

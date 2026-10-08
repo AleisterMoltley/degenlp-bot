@@ -74,7 +74,7 @@ export interface FleetPlan {
   summary: string;
 }
 
-const COOL_RE = /divergence|edge gone|left the range|left the fee list|risk budget|scratch|skim window closed|tape turned|bid left behind/;
+const COOL_RE = /divergence|edge gone|left the range|left the fee list|risk budget|scratch|skim window closed|tape turned|bid left behind|chop ended|not found/;
 
 export function coolsOff(reason: string): boolean {
   return COOL_RE.test(reason);
@@ -217,8 +217,17 @@ function travelBlocks(pool: PoolCandidate): boolean {
   });
 }
 
+/**
+ * The bin just stepped down. SOL deposited there is the next sell's bag.
+ * A flat bin and a step up are the fee. Missing means the tape was not read,
+ * and the travel gate already refuses that.
+ */
+function freshDownBlocks(pool: PoolCandidate): boolean {
+  return (pool.binTapeLastStep ?? 0) < 0;
+}
+
 function entryBlocked(pool: PoolCandidate, kind: "skim" | "core"): boolean {
-  return geometryBlocks(pool) || travelBlocks(pool) || chopBlocks(pool, kind);
+  return geometryBlocks(pool) || travelBlocks(pool) || chopBlocks(pool, kind) || freshDownBlocks(pool);
 }
 
 function skimQuote(
@@ -802,7 +811,8 @@ export function planFleet(args: {
       const blockedByTape = tapeBlocksEntry(pool, args.moves);
       const blockedByGeometry = !blockedByTape && geometryBlocks(pool);
       const blockedByTravel = !blockedByTape && !blockedByGeometry && travelBlocks(pool);
-      const blockedByChop = !blockedByTape && !blockedByGeometry && !blockedByTravel && chopBlocks(pool, "skim");
+      const blockedByChop =
+        !blockedByTape && !blockedByGeometry && !blockedByTravel && (chopBlocks(pool, "skim") || freshDownBlocks(pool));
       const blockedByGate = blockedByTape || blockedByGeometry || blockedByTravel || blockedByChop;
       const strategy = blockedByTape
         ? "tape"

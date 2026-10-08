@@ -11,7 +11,7 @@ import {
 import BN from "bn.js";
 import { config } from "./config.js";
 import { activeIdFromPool, activeIdsFromAccounts } from "./fillwatch.js";
-import { buildJupiterSwap, sellSlices, SOL_MINT } from "./jupiter.js";
+import { buildJupiterSwap, sellSlices, SOL_MINT, UNWIND_ATTEMPTS } from "./jupiter.js";
 import { buildPosition } from "./position.js";
 import type { ActivePosition, OpportunityCheck, PoolCandidate } from "./types.js";
 
@@ -482,50 +482,63 @@ export class DlmmExecutor {
    * Simulate first, then send with preflight skipped.
    */
   private async sendMemeSell(inputMint: string, amount: bigint): Promise<void> {
-    const built = await buildJupiterSwap({
-      inputMint,
-      outputMint: SOL_MINT,
-      amount,
-      userPublicKey: this.wallet.publicKey.toBase58(),
-      slippageBps: 5_000,
-      maxImpact: 0.95,
-    });
-    const tx = VersionedTransaction.deserialize(Buffer.from(built.swapTransaction, "base64"));
-    tx.sign([this.wallet]);
-    const sim = await this.connection.simulateTransaction(tx, {
-      commitment: "confirmed",
-      sigVerify: true,
-    });
-    if (sim.value.err) {
-      const detail = (sim.value.logs ?? [])
-        .filter((line) => /error|failed|insufficient/i.test(line))
-        .slice(-3)
-        .join(" | ");
-      throw new Error(`swap simulation rejected amount=${amount} ${detail || JSON.stringify(sim.value.err)}`);
-    }
-    const before = await this.rawBalance(inputMint);
-    const signature = await this.connection.sendRawTransaction(tx.serialize(), {
-      skipPreflight: true,
-      maxRetries: 3,
-    });
-    try {
-      const height = built.lastValidBlockHeight;
-      const result =
-        height > 0
-          ? await this.connection.confirmTransaction(
-              { signature, blockhash: tx.message.recentBlockhash, lastValidBlockHeight: height },
-              "confirmed",
-            )
-          : await this.connection.confirmTransaction(signature, "confirmed");
-      if (result.value.err) throw new Error("swap transaction failed");
-    } catch (err) {
-      if (await this.balanceDropped(inputMint, before)) {
-        console.log(`[swap] meme back to SOL sig=${signature}`);
-        return;
+    let last = "unwind failed";
+    for (const attempt of UNWIND_ATTEMPTS) {
+      let built: Awaited<ReturnType<typeof buildJupiterSwap>>;
+      try {
+        built = await buildJupiterSwap({
+          inputMint,
+          outputMint: SOL_MINT,
+          amount,
+          userPublicKey: this.wallet.publicKey.toBase58(),
+          slippageBps: attempt.slippageBps,
+          maxImpact: attempt.maxImpact,
+        });
+      } catch (err) {
+        last = err instanceof Error ? err.message : last;
+        continue;
       }
-      throw err;
+      const tx = VersionedTransaction.deserialize(Buffer.from(built.swapTransaction, "base64"));
+      tx.sign([this.wallet]);
+      const sim = await this.connection.simulateTransaction(tx, {
+        commitment: "confirmed",
+        sigVerify: true,
+      });
+      if (sim.value.err) {
+        const detail = (sim.value.logs ?? [])
+          .filter((line) => /error|failed|insufficient/i.test(line))
+          .slice(-3)
+          .join(" | ");
+        last = `swap simulation rejected amount=${amount} ${detail || JSON.stringify(sim.value.err)}`;
+        continue;
+      }
+      const before = await this.rawBalance(inputMint);
+      const signature = await this.connection.sendRawTransaction(tx.serialize(), {
+        skipPreflight: true,
+        maxRetries: 3,
+      });
+      try {
+        const height = built.lastValidBlockHeight;
+        const result =
+          height > 0
+            ? await this.connection.confirmTransaction(
+                { signature, blockhash: tx.message.recentBlockhash, lastValidBlockHeight: height },
+                "confirmed",
+              )
+            : await this.connection.confirmTransaction(signature, "confirmed");
+        if (result.value.err) throw new Error("swap transaction failed");
+      } catch (err) {
+        if (await this.balanceDropped(inputMint, before)) {
+          console.log(`[swap] meme back to SOL sig=${signature}`);
+          return;
+        }
+        last = err instanceof Error ? err.message : last;
+        continue;
+      }
+      console.log(`[swap] meme back to SOL sig=${signature}`);
+      return;
     }
-    console.log(`[swap] meme back to SOL sig=${signature}`);
+    throw new Error(last);
   }
 
   private async balanceDropped(mint: string, before: bigint): Promise<boolean> {
@@ -595,7 +608,8 @@ export class DlmmExecutor {
     if (other !== SOL_MINT) throw new Error("pool has no SOL side");
     const swapForY = memeIsX;
     const bins = await dlmm.getBinArrayForSwap(swapForY, 4);
-    const quote = dlmm.swapQuote(new BN(amount.toString()), swapForY, new BN(5_000), bins, true);
+    const unwindBps = UNWIND_ATTEMPTS[UNWIND_ATTEMPTS.length - 1].slippageBps;
+    const quote = dlmm.swapQuote(new BN(amount.toString()), swapForY, new BN(unwindBps), bins, true);
     if (!quote.outAmount || quote.outAmount.lten(0)) throw new Error("dlmm quote was empty");
     const inAmount = quote.consumedInAmount?.gtn(0) ? quote.consumedInAmount : new BN(amount.toString());
     const minOut = quote.minOutAmount?.gtn(0) ? quote.minOutAmount : new BN(1);

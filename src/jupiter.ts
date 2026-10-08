@@ -2,6 +2,15 @@ export const SOL_MINT = "So11111111111111111111111111111111111111112";
 export const LIVE_SLIPPAGE_BPS = 300;
 export const MAX_PRICE_IMPACT = 0.03;
 
+/**
+ * Unwind attempts, tight first. A route that needs more than 8% impact is not
+ * a salvage: filling it locks a loss the bin price did not have.
+ */
+export const UNWIND_ATTEMPTS = [
+  { slippageBps: 300, maxImpact: 0.03 },
+  { slippageBps: 800, maxImpact: 0.08 },
+] as const;
+
 const JUPITER = "https://lite-api.jup.ag/swap/v1";
 
 export interface SwapQuote {

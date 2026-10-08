@@ -6,6 +6,8 @@ export interface BinTapeRead {
   crossings: number;
   netBins: number;
   maxStep: number;
+  /** 1 up, -1 down, 0 flat. The last completed step. Micro-chop shape does not read it. */
+  lastStep?: number;
 }
 
 export function binTapeFromIds(
@@ -15,11 +17,12 @@ export function binTapeFromIds(
 ): BinTapeRead {
   const inside = rows.filter((row) => now - row.at <= windowMs && Number.isInteger(row.id));
   if (inside.length < 2) {
-    return { samples: inside.length, spanMs: 0, crossings: 0, netBins: 0, maxStep: 0 };
+    return { samples: inside.length, spanMs: 0, crossings: 0, netBins: 0, maxStep: 0, lastStep: 0 };
   }
   let crossings = 0;
   let prevSign = 0;
   let maxStep = 0;
+  let lastStep = 0;
   for (let i = 1; i < inside.length; i += 1) {
     const delta = inside[i].id - inside[i - 1].id;
     if (delta === 0) continue;
@@ -27,6 +30,7 @@ export function binTapeFromIds(
     const sign = delta > 0 ? 1 : -1;
     if (prevSign !== 0 && sign !== prevSign) crossings += 1;
     prevSign = sign;
+    lastStep = sign;
   }
   return {
     samples: inside.length,
@@ -34,6 +38,7 @@ export function binTapeFromIds(
     crossings,
     netBins: Math.abs(inside[inside.length - 1].id - inside[0].id),
     maxStep,
+    lastStep,
   };
 }
 

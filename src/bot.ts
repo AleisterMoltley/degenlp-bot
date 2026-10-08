@@ -457,6 +457,7 @@ export class DegenLpBot {
       pool.binTapeCrossings = read.crossings;
       pool.binTapeNet = read.netBins;
       pool.binTapeMaxStep = read.maxStep;
+      pool.binTapeLastStep = read.lastStep;
     }
     const seated = new Set(this.state.seats.map((seat) => seat.poolAddress));
     for (const [key, rows] of this.binTapes) {

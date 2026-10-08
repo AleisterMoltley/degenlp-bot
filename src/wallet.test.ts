@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { bs58 } from "@coral-xyz/anchor/dist/cjs/utils/bytes";
 import { Keypair } from "@solana/web3.js";
-import { assertSwapQuote, quoteFailure, sellSlices } from "./jupiter.js";
+import { assertSwapQuote, quoteFailure, sellSlices, UNWIND_ATTEMPTS } from "./jupiter.js";
 import { capDeploySol, parseWalletSecret, saveWalletSecret } from "./wallet.js";
 
 test("a base58 secret and a json byte array resolve to the same public key", () => {
@@ -25,6 +25,14 @@ test("capDeploySol keeps a fee reserve and refuses a dust wallet", () => {
   assert.equal(capDeploySol(0.72, 1_000_000_000), 0.72);
   assert.equal(capDeploySol(0.72, 200_000_000), 0.15);
   assert.throws(() => capDeploySol(0.72, 80_000_000), /fee reserve/);
+});
+
+test("an unwind stops at 8% impact", () => {
+  assert.deepEqual(
+    UNWIND_ATTEMPTS.map((row) => row.slippageBps),
+    [300, 800],
+  );
+  assert.ok(UNWIND_ATTEMPTS.every((row) => row.maxImpact <= 0.08));
 });
 
 test("a sell tries the full bag and then smaller slices", () => {

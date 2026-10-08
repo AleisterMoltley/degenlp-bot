@@ -127,4 +127,6 @@ export interface PoolCandidate {
   binTapeCrossings?: number;
   binTapeNet?: number;
   binTapeMaxStep?: number;
+  /** Last completed active-bin step. 1 up, -1 down, 0 flat. Missing means unread. */
+  binTapeLastStep?: number;
 }

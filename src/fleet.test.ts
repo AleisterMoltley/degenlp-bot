@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { quoteEdge } from "./edge.js";
-import { downwardMove, offBinSlidePays, planFleet, seatCeilingSol, SEAT_FLOOR_USD, skimFillFraction } from "./fleet.js";
+import { coolsOff, downwardMove, offBinSlidePays, planFleet, seatCeilingSol, SEAT_FLOOR_USD, skimFillFraction } from "./fleet.js";
 import { halfWidthFromBins } from "./pnl.js";
 import type { ActivePosition, PoolCandidate } from "./types.js";
 
@@ -558,6 +558,35 @@ test("a deep bin stays shut and a faster bin is seated first", () => {
   const plan = planFleet({ pools: [slow, fast], seats: [], deploySol: 0.72, now, dlmmOnly: true });
   assert.ok(plan.opens.length >= 1, plan.summary);
   assert.equal(plan.opens[0]?.pool.poolAddress, "fast");
+});
+
+test("a skim does not sit in a bin that just stepped down", () => {
+  const down = planFleet({
+    pools: [paying({ binTapeLastStep: -1 })],
+    seats: [],
+    deploySol: 0.72,
+    now,
+    dlmmOnly: true,
+  });
+  assert.equal(down.opens.length, 0, down.summary);
+  assert.equal(down.preview[0]?.strategy, "chop");
+  assert.equal(down.preview[0]?.metThreshold, false);
+
+  const up = planFleet({
+    pools: [paying({ binTapeLastStep: 1 })],
+    seats: [],
+    deploySol: 0.72,
+    now,
+    dlmmOnly: true,
+  });
+  assert.equal(up.opens.length, 1, up.summary);
+});
+
+test("a dead chop and a vanished seat cool the pool", () => {
+  assert.equal(coolsOff("chop ended"), true);
+  assert.equal(coolsOff("Position not found on-chain - already closed"), true);
+  assert.equal(coolsOff("bid is SOL again"), false);
+  assert.equal(coolsOff("earning the bin"), false);
 });
 
 test("a flat bin that turns over faster than its SOL is a skim", () => {
