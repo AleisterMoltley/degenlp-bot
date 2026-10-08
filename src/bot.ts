@@ -1,6 +1,6 @@
 import { buildCandidates, fetchOriginalOpportunityChecks, fetchTopPumpTokens } from "./apis.js";
 import { config } from "./config.js";
-import { bankableUsd, collectedFeePct } from "./edge.js";
+import { bankableUsd, collectedFeePct, depthReadRank } from "./edge.js";
 import { chopFromPrices } from "./chop.js";
 import { bidCycle, MAX_BID_SLIDES, slideIntoActive } from "./fillwatch.js";
 import { binTapeFromIds, feeRateClears, mintShouldSleep, priceBinId } from "./travel.js";
@@ -383,7 +383,7 @@ export class DegenLpBot {
           (pool.chopSamples ?? 0) >= 4 &&
           feeRateClears(pool.baseFeePct ?? 0, pool.binStep ?? 80, this.unwindBps()),
       )
-      .sort((a, b) => collectedFeePct(b) - collectedFeePct(a) || (b.baseFeePct ?? 0) - (a.baseFeePct ?? 0))
+      .sort((a, b) => depthReadRank(b) - depthReadRank(a) || (b.baseFeePct ?? 0) - (a.baseFeePct ?? 0))
       .slice(0, 8);
     await Promise.all(
       ranked.map(async (pool) => {

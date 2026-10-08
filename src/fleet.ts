@@ -175,6 +175,24 @@ function feeToTvl(pool: PoolCandidate): number {
   return pool.fee30mUsd / Math.max(pool.pairLiquidityUsd, 1);
 }
 
+/** How many times the active bin's SOL turns over in the fee window. Higher pays the seat sooner. */
+function binTurnover(pool: PoolCandidate): number {
+  const bin = pool.binSolUsd;
+  if (!(bin != null && bin > 0) || !(pool.volume30mUsd > 0)) return 0;
+  return pool.volume30mUsd / bin;
+}
+
+/** Dollars first, then the bin that turns over, then the fee per step. A second flip is not booked. */
+function skimAhead(
+  a: { pool: PoolCandidate; metrics: Metrics },
+  b: { pool: PoolCandidate; metrics: Metrics },
+): boolean {
+  if (a.metrics.edgeUsd !== b.metrics.edgeUsd) return a.metrics.edgeUsd > b.metrics.edgeUsd;
+  const turn = binTurnover(a.pool) - binTurnover(b.pool);
+  if (turn !== 0) return turn > 0;
+  return feePerBin(a.pool) > feePerBin(b.pool);
+}
+
 /** One DLMM per coin. The hotter fee/TVL sibling stays, and a watched flag survives. */
 function onePoolPerMint(pools: PoolCandidate[]): PoolCandidate[] {
   const best = new Map<string, PoolCandidate>();
@@ -219,15 +237,9 @@ function pickSkims(
       if (!quoted.metrics.metThreshold || quoted.metrics.edgeUsd <= 0) continue;
       const key = pool.tokenMint || pool.poolAddress;
       const have = byMint.get(key);
-      const better =
-        !have ||
-        feePerBin(quoted.pool) > feePerBin(have.pool) ||
-        (feePerBin(quoted.pool) === feePerBin(have.pool) && quoted.metrics.edgeUsd > have.metrics.edgeUsd);
-      if (better) byMint.set(key, quoted);
+      if (!have || skimAhead(quoted, have)) byMint.set(key, quoted);
     }
-    const pass = [...byMint.values()].sort(
-      (a, b) => feePerBin(b.pool) - feePerBin(a.pool) || b.metrics.edgeUsd - a.metrics.edgeUsd,
-    );
+    const pass = [...byMint.values()].sort((a, b) => (skimAhead(a, b) ? -1 : skimAhead(b, a) ? 1 : 0));
     if (pass.length < n) continue;
     return pass.slice(0, n).map((row) => ({
       pool: row.pool,

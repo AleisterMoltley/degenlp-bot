@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { bankableUsd, chooseShape, quoteEdge } from "./edge.js";
+import { bankableUsd, chooseShape, depthReadRank, fillNotionalUsd, quoteEdge } from "./edge.js";
 import type { PoolCandidate } from "./types.js";
 
 function pool(fee30mUsd: number, over: Partial<PoolCandidate> = {}): PoolCandidate {
@@ -92,6 +92,19 @@ test("a one-bin fill credits the collected fee and still pays the scratch", () =
   assert.ok(Math.abs(fill.ilBudgetUsd - 0.16 * 100 * 0.035) < 1e-9);
   assert.ok(fill.expectedFeesUsd <= 0.05 * 16 + 1e-9);
   assert.ok(fill.expectedFeesUsd > 0.04 * 16);
+});
+
+test("a deep active bin does not get credit for a fill it cannot reach", () => {
+  const skim = { ...input, deploySol: 0.16, fillFraction: 0.035, swapBps: 0, fillFee: true as const };
+  const base = pool(2_000, { baseFeePct: 0.05, volume30mUsd: 40_000, binStep: 100, rangeHalfWidth: 0.01 });
+  const deep = quoteEdge({ ...base, binSolUsd: 100_000 }, skim);
+  const thin = quoteEdge({ ...base, binSolUsd: 5_000 }, skim);
+  assert.ok(deep.expectedFeesUsd < thin.expectedFeesUsd);
+  assert.equal(deep.profitable, false);
+  assert.equal(thin.profitable, true);
+  assert.ok(fillNotionalUsd({ volume30mUsd: 40_000, binSolUsd: 100_000 }, 16) < 16);
+  assert.equal(fillNotionalUsd({ volume30mUsd: 40_000, binSolUsd: 5_000 }, 16), 16);
+  assert.ok(depthReadRank({ ...base, pairLiquidityUsd: 8_000 }) > depthReadRank({ ...base, pairLiquidityUsd: 200_000 }));
 });
 
 test("a sticker fee the pool did not collect stays red", () => {

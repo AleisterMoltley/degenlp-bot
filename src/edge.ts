@@ -36,6 +36,18 @@ const FLAT: EdgeQuote = {
   profitable: false,
 };
 
+/** Prior for the eight active-bin reads. Fee rate times how fast the pool turns over. */
+export function depthReadRank(pool: {
+  baseFeePct?: number;
+  fee30mUsd: number;
+  volume30mUsd: number;
+  pairLiquidityUsd: number;
+}): number {
+  const tvl = pool.pairLiquidityUsd;
+  if (!(tvl > 0)) return 0;
+  return collectedFeePct(pool) * (pool.volume30mUsd / tvl);
+}
+
 /**
  * Fee rate a fill can actually collect. The lesser of the posted base fee and
  * the fees the pool collected per dollar of volume. A sticker with no flow pays nothing.
@@ -51,6 +63,26 @@ export function collectedFeePct(pool: { baseFeePct?: number; fee30mUsd: number; 
  * The pool list does not say which, so the fill quote keeps the standard 90%.
  */
 const LP_FEE_KEEP = 0.9;
+
+/**
+ * Dollars of this seat the next half hour can actually trade against.
+ * A full conversion earns the fee on the deposit no matter how deep the bin is,
+ * but only if that much volume reaches our liquidity. Our share of the active
+ * bin is the deposit over the SOL already there plus the deposit. A missing
+ * bin read keeps the old cap, which is the lesser of the seat and the pool volume.
+ * This never credits a second flip.
+ */
+export function fillNotionalUsd(
+  pool: { volume30mUsd: number; binSolUsd?: number },
+  deployUsd: number,
+): number {
+  if (!(deployUsd > 0) || !(pool.volume30mUsd > 0)) return 0;
+  const reached = Math.min(deployUsd, pool.volume30mUsd);
+  const bin = pool.binSolUsd;
+  if (!(bin != null && bin > 0)) return reached;
+  const share = deployUsd / (bin + deployUsd);
+  return Math.min(deployUsd, pool.volume30mUsd * share);
+}
 
 /** Expected dollars left after the round trip and a small adverse move. */
 export function quoteEdge(pool: PoolCandidate, input: EdgeInput): EdgeQuote {
@@ -79,8 +111,7 @@ export function quoteEdge(pool: PoolCandidate, input: EdgeInput): EdgeQuote {
   if (input.fillFee && pool.side === "bid") {
     let feePct = collectedFeePct(pool);
     if (prior30 > 0 && pool.fee30mUsd < prior30 * 0.75) feePct *= 0.45;
-    const filled = Math.min(1, pool.volume30mUsd / deployUsd);
-    expectedFeesUsd = feePct * deployUsd * filled * LP_FEE_KEEP;
+    expectedFeesUsd = feePct * fillNotionalUsd(pool, deployUsd) * LP_FEE_KEEP;
   }
   const roundTripUsd =
     entryCostUsd({

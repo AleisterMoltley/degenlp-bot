@@ -32,7 +32,7 @@ function pool(over: Partial<PoolCandidate> = {}): PoolCandidate {
     chopSamples: 8,
     chopCrossings: 4,
     chopNetBins: 0.5,
-    binSolUsd: 100_000,
+    binSolUsd: 8_000,
     baseFeePct: 0.08,
     binTapeSamples: 12,
     binTapeSpanMs: 60_000,
@@ -348,6 +348,7 @@ test("a seat-sized print can open under the 30-minute volume floor", () => {
     volume30mUsd: 800,
     pairLiquidityUsd: 8_000,
     tokenLiquidityUsd: 8_000,
+    binSolUsd: 400,
   });
   const plan = planFleet({ pools: [small], seats: [], deploySol: 0.72, now, dlmmOnly: true });
   assert.equal(plan.opens.length, 1, plan.summary);
@@ -400,6 +401,30 @@ test("a thin base fee does not open", () => {
   assert.equal(plan.opens.length, 0);
   assert.match(plan.summary, /fee rate too thin/);
   assert.equal(plan.preview[0]?.strategy, "geometry");
+});
+
+test("a deep bin stays shut and a faster bin is seated first", () => {
+  const deep = paying({ binSolUsd: 100_000 });
+  const buried = planFleet({ pools: [deep], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.equal(buried.opens.length, 0, buried.summary);
+
+  const fast = paying({
+    poolAddress: "fast",
+    tokenMint: "fast",
+    tokenSymbol: "FAST",
+    poolName: "FAST-SOL",
+    binSolUsd: 2_000,
+  });
+  const slow = paying({
+    poolAddress: "slow",
+    tokenMint: "slow",
+    tokenSymbol: "SLOW",
+    poolName: "SLOW-SOL",
+    binSolUsd: 12_000,
+  });
+  const plan = planFleet({ pools: [slow, fast], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.ok(plan.opens.length >= 1, plan.summary);
+  assert.equal(plan.opens[0]?.pool.poolAddress, "fast");
 });
 
 test("a flat active bin is a seat and a one-way step is not", () => {
