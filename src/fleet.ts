@@ -69,12 +69,13 @@ export interface FleetPlan {
   opens: FleetOpen[];
   holds: FleetHold[];
   slides: FleetSlide[];
+  switches: FleetSlide[];
   adds: FleetAdd[];
   preview: FleetPreview[];
   summary: string;
 }
 
-const COOL_RE = /divergence|edge gone|left the range|left the fee list|risk budget|scratch|skim window closed|tape turned|bid left behind|chop ended|not found/;
+const COOL_RE = /divergence|edge gone|left the range|left the fee list|risk budget|scratch|skim window closed|tape turned|bid left behind|ask left behind|chop ended|switch failed|not found/;
 
 export function coolsOff(reason: string): boolean {
   return COOL_RE.test(reason);
@@ -480,6 +481,55 @@ export function offBinSlidePays(
   return slideFee - txCostUsd * 2 >= stayFee + Math.max(0, minEdgeUsd);
 }
 
+/**
+ * A filled bid sits under a price that already left. Moving the meme onto the
+ * active bin spends two transactions so the next buy pays the fee and returns
+ * SOL. The buy is the other half of the minute. The figure is one pass, not a
+ * second flip, and it is not a slide down into a dump.
+ */
+export function askSwitchPays(
+  pool: PoolCandidate,
+  deployUsd: number,
+  txCostUsd: number,
+  minEdgeUsd: number,
+): boolean {
+  return offBinSlidePays(pool, deployUsd, txCostUsd, minEdgeUsd);
+}
+
+export type InPoolSwitch = "ask" | "lift";
+
+/**
+ * The price left a filled one-bin upward. One move puts that bag on the active bin.
+ * Ask: the meme share's next buy clears the two transactions. The next buy pays
+ * the fee and turns the meme back into SOL. SOL still in the seat moves with it.
+ * Lift: that buy does not clear, but the SOL still in the seat would. The same
+ * move keeps that SOL in the bin that pays. A one-bin gap stays. A dip is not a
+ * switch. One move per bag. This is one pass, not a second flip, and not a promise.
+ */
+export function inPoolSwitch(args: {
+  pool: PoolCandidate;
+  solDeployed: number;
+  fillFraction?: number;
+  filled: boolean;
+  pose?: "bid" | "ask";
+  switches?: number;
+  binsUp: number;
+  boardDown: boolean;
+}): InPoolSwitch | null {
+  if (!args.filled || args.pose === "ask" || (args.switches ?? 0) >= 1) return null;
+  if (!(args.binsUp >= 2 - 1e-6)) return null;
+  if (args.boardDown || !chopConfirmed(args.pool)) return null;
+  const frac = args.fillFraction == null ? 1 : Math.min(1, Math.max(0, args.fillFraction));
+  if (!(frac > 0)) return null;
+  const solPx = args.pool.solPrice || 0;
+  if (!(solPx > 0) || !(args.solDeployed > 0)) return null;
+  const memeUsd = args.solDeployed * frac * solPx;
+  const solUsd = args.solDeployed * (1 - frac) * solPx;
+  if (askSwitchPays(args.pool, memeUsd, config.txCostUsd, config.minEdgeUsd)) return "ask";
+  if (frac < 1 && offBinSlidePays(args.pool, solUsd, config.txCostUsd, config.minEdgeUsd)) return "lift";
+  return null;
+}
+
 export function planFleet(args: {
   pools: PoolCandidate[];
   seats: ActivePosition[];
@@ -496,6 +546,7 @@ export function planFleet(args: {
   const closes: FleetClose[] = [];
   const holds: FleetHold[] = [];
   const slides: FleetSlide[] = [];
+  const switches: FleetSlide[] = [];
   let coreReopen: FleetOpen | null = null;
 
   for (const seat of args.seats) {
@@ -524,6 +575,75 @@ export function planFleet(args: {
     // bin. Two bins, a dead chop, or a third chase leaves. Closing on the
     // first return to SOL would miss the next sell.
     const binStep = seat.binStep || pool.binStep || 80;
+    // The buy paid the ask, or a lift finished as SOL. The liquidity sits at
+    // askPrice. Anchor the bid there so the old entry does not close it as a runner.
+    if (
+      oneBinSkim &&
+      seat.filled !== true &&
+      seat.pose !== "ask" &&
+      (seat.switches ?? 0) > 0 &&
+      (seat.askPrice ?? 0) > 0
+    ) {
+      seat.entryPrice = seat.askPrice as number;
+      seat.lastPrice = seat.askPrice as number;
+      seat.switches = 0;
+      seat.slides = 0;
+    }
+    if (oneBinSkim && seat.pose === "ask") {
+      const anchor = seat.askPrice && seat.askPrice > 0 ? seat.askPrice : seat.entryPrice;
+      const fromAsk = binsAboveEntry(price, anchor, binStep);
+      if (Math.abs(fromAsk) < 1 - 1e-6 && !chopStillPays(pool)) {
+        closes.push({ id: seat.id, action: "exit", reason: "chop ended" });
+        continue;
+      }
+      if (fromAsk <= -2 + 1e-6 && !chopStillPays(pool)) {
+        closes.push({ id: seat.id, action: "exit", reason: "ask left behind" });
+        continue;
+      }
+      if (
+        fromAsk <= -2 + 1e-6 &&
+        filledShouldSell({
+          binsUp: -fromAsk,
+          binStep,
+          unwindBps: UNWIND_BPS,
+          feePct: collectedFeePct(pool),
+          chopAlive: chopStillPays(pool),
+          direction: "down",
+          boardDown: args.boardDown === true,
+        })
+      ) {
+        closes.push({ id: seat.id, action: "exit", reason: "scratched the fill" });
+        continue;
+      }
+      if (!chopStillPays(pool) && Math.abs(fromAsk) >= 2 - 1e-6) {
+        closes.push({ id: seat.id, action: "exit", reason: "ask left behind" });
+        continue;
+      }
+      holds.push({ id: seat.id, reason: "ask waits for the buy" });
+      continue;
+    }
+    // Above the fill by two bins: one move onto the active bin. The ask catches
+    // the next buy. The lift catches the next sell with the SOL that is still
+    // in the seat. One bin above stays. A dip does not move.
+    if (oneBinSkim) {
+      const kind = inPoolSwitch({
+        pool,
+        solDeployed: seat.solDeployed,
+        fillFraction: seat.fillFraction,
+        filled: seat.filled === true,
+        pose: seat.pose,
+        switches: seat.switches,
+        binsUp: binsAboveEntry(price, seat.entryPrice, binStep),
+        boardDown: args.boardDown === true,
+      });
+      if (kind) {
+        switches.push({
+          id: seat.id,
+          reason: kind === "ask" ? "switch the fill into the active ask" : "lift the SOL bid into the active bin",
+        });
+        continue;
+      }
+    }
     // A fill under the bin is meme. Selling it locks the dip. The way back
     // through the bin pays the fee and clears the mark. A live chop waits.
     // A dead chop, or a board falling together, sells once the dip is past
@@ -731,7 +851,7 @@ export function planFleet(args: {
       free,
       ceiling,
       args.moves,
-      new Set(slides.map((row) => row.id)),
+      new Set([...slides, ...switches].map((row) => row.id)),
     );
     adds = scaled.adds;
     free = scaled.free;
@@ -865,10 +985,11 @@ export function planFleet(args: {
   let summary = "no pool clears costs";
   if (args.freezeOpens && !closes.length) {
     summary = "shock pause; no new seats";
-  } else if (opens.length || closes.length || slides.length || adds.length) {
+  } else if (opens.length || closes.length || slides.length || switches.length || adds.length) {
     const slideText = slides.length ? ` slide ${slides.length}` : "";
+    const switchText = switches.length ? ` switch ${switches.length}` : "";
     const addText = adds.length ? ` add ${adds.length}` : "";
-    summary = `open ${opens.length}${names ? ` (${names})` : ""} close ${closes.length}${slideText}${addText}`;
+    summary = `open ${opens.length}${names ? ` (${names})` : ""} close ${closes.length}${slideText}${switchText}${addText}`;
   } else if (args.seats.length) {
     summary = `holding ${args.seats.length}`;
   } else if (args.boardDown) {
@@ -885,5 +1006,5 @@ export function planFleet(args: {
     summary = `no pool clears costs; best ${bestText}`;
   }
 
-  return { closes, opens, holds, slides, adds, preview, summary };
+  return { closes, opens, holds, slides, switches, adds, preview, summary };
 }

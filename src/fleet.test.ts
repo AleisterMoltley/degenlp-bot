@@ -585,8 +585,11 @@ test("a skim does not sit in a bin that just stepped down", () => {
 test("a dead chop and a vanished seat cool the pool", () => {
   assert.equal(coolsOff("chop ended"), true);
   assert.equal(coolsOff("Position not found on-chain - already closed"), true);
+  assert.equal(coolsOff("ask left behind"), true);
+  assert.equal(coolsOff("switch failed; fill removed"), true);
   assert.equal(coolsOff("bid is SOL again"), false);
   assert.equal(coolsOff("earning the bin"), false);
+  assert.equal(coolsOff("ask waits for the buy"), false);
 });
 
 test("a flat bin that turns over faster than its SOL is a skim", () => {
@@ -1291,6 +1294,129 @@ test("downwardMove is the drop from the window peak", () => {
   assert.ok(Math.abs(drop - 0.04) < 1e-9);
   assert.equal(downwardMove([{ at, price: 1 }], at, 60_000), 0);
   assert.equal(downwardMove([{ at: at - 120_000, price: 2 }, { at: at - 90_000, price: 1 }], at, 60_000), 0);
+});
+
+test("a filled seat can switch onto the active bin, and only upward", () => {
+  const filled = {
+    filled: true,
+    touched: true,
+    enteredAt: now - 10_000,
+    entryPrice: 1,
+    lastPrice: 1,
+    binStep: 100,
+    solDeployed: 0.5,
+  };
+  const ask = planFleet({
+    pools: [pool({ priceUsd: 1.08 })],
+    seats: [seat(filled)],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(ask.switches.length, 1);
+  assert.equal(ask.switches[0]?.reason, "switch the fill into the active ask");
+  assert.equal(ask.closes.length, 0, ask.closes.map((row) => row.reason).join(","));
+  assert.equal(ask.slides.length, 0);
+
+  const oneBin = planFleet({
+    pools: [pool({ priceUsd: 1.01 })],
+    seats: [seat(filled)],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(oneBin.switches.length, 0);
+  assert.equal(oneBin.closes.length, 0, oneBin.closes.map((row) => row.reason).join(","));
+  assert.match(oneBin.holds[0]?.reason ?? "", /round trip/);
+
+  const thin = planFleet({
+    pools: [pool({ priceUsd: 1.08 })],
+    seats: [seat({ ...filled, solDeployed: 0.12 })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(thin.switches.length, 0);
+  assert.equal(thin.closes[0]?.reason, "bid left behind");
+
+  const dead = planFleet({
+    pools: [pool({ priceUsd: 1.08, chopCrossings: 0, chopNetBins: 6 })],
+    seats: [seat(filled)],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(dead.switches.length, 0);
+  assert.equal(dead.closes[0]?.reason, "bid left behind");
+
+  const down = planFleet({
+    pools: [pool({ priceUsd: 0.96 })],
+    seats: [seat(filled)],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(down.switches.length, 0);
+  assert.equal(down.closes.length, 0, down.closes.map((row) => row.reason).join(","));
+  assert.match(down.holds[0]?.reason ?? "", /round trip/);
+
+  const board = planFleet({
+    pools: [pool({ priceUsd: 1.08 })],
+    seats: [seat(filled)],
+    deploySol: 0.72,
+    now,
+    boardDown: true,
+  });
+  assert.equal(board.switches.length, 0);
+  assert.equal(board.closes[0]?.reason, "bid left behind");
+
+  const again = planFleet({
+    pools: [pool({ priceUsd: 1.08 })],
+    seats: [seat({ ...filled, pose: "ask", askPrice: 1.08, switches: 1 })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(again.switches.length, 0);
+  assert.equal(again.closes.length, 0, again.closes.map((row) => row.reason).join(","));
+  assert.match(again.holds[0]?.reason ?? "", /ask waits/);
+
+  const stranded = planFleet({
+    pools: [pool({ priceUsd: 0.92, chopCrossings: 0, chopNetBins: 6 })],
+    seats: [seat({ ...filled, pose: "ask", askPrice: 1.08, switches: 1 })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(stranded.switches.length, 0);
+  assert.equal(stranded.closes[0]?.reason, "ask left behind");
+
+  const partial = planFleet({
+    pools: [pool({ priceUsd: 1.08 })],
+    seats: [seat({ ...filled, fillFraction: 0.2 })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(partial.switches.length, 1);
+  assert.equal(partial.switches[0]?.reason, "lift the SOL bid into the active bin");
+  assert.equal(partial.closes.length, 0, partial.closes.map((row) => row.reason).join(","));
+
+  const back = seat({
+    filled: false,
+    touched: true,
+    enteredAt: now - 10_000,
+    entryPrice: 1,
+    lastPrice: 1.08,
+    binStep: 100,
+    solDeployed: 0.5,
+    pose: "bid",
+    askPrice: 1.08,
+    switches: 1,
+  });
+  const rebid = planFleet({
+    pools: [pool({ priceUsd: 1.08 })],
+    seats: [back],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(rebid.switches.length, 0);
+  assert.equal(rebid.closes.length, 0, rebid.closes.map((row) => row.reason).join(","));
+  assert.match(rebid.holds[0]?.reason ?? "", /bid is SOL again|earning/);
+  assert.equal(back.entryPrice, 1.08);
+  assert.equal(back.switches, 0);
 });
 
 test("an open pool is not entered twice", () => {

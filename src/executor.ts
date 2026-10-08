@@ -352,6 +352,101 @@ export class DlmmExecutor {
     }
   }
 
+  /**
+   * Move a filled one-bin onto the active bin, once.
+   * Meme goes on so the next buy pays the fee and turns it back into SOL.
+   * SOL principal from the same seat goes with it, so the remove does not
+   * idle the part that is still a bid. Nothing is taken from the fee reserve.
+   * A remove that lands without a new position is flat: the caller must not
+   * remove again. Price at or below the fill is not a move.
+   */
+  async switchFillToAsk(position: ActivePosition): Promise<SlideResult> {
+    if (config.dryRun) return { ok: false, flat: false, reason: "paper switch stays in the bot" };
+    const snap = await this.positionInventory(position.poolAddress, position.positionAddress, position.tokenMint);
+    if (snap.memeRaw <= DUST_RAW) return { ok: false, flat: false, reason: "fill is already SOL" };
+
+    const dlmm = await DLMM.create(this.connection, new PublicKey(position.poolAddress));
+    const active = await dlmm.getActiveBin();
+    if (active.binId <= position.maxBinId) return { ok: false, flat: false, reason: "price came back" };
+
+    const tokenX = dlmm.tokenX.publicKey.toBase58();
+    const tokenY = dlmm.tokenY.publicKey.toBase58();
+    const memeIsX = tokenX === position.tokenMint;
+    const memeIsY = tokenY === position.tokenMint;
+    if (!memeIsX && !memeIsY) return { ok: false, flat: false, reason: "pool does not hold this mint" };
+    if ((memeIsX && tokenX === SOL_MINT) || (memeIsY && tokenY === SOL_MINT)) {
+      return { ok: false, flat: false, reason: "meme side is SOL" };
+    }
+    const solIsY = tokenY === SOL_MINT;
+    if (tokenX !== SOL_MINT && !solIsY) return { ok: false, flat: false, reason: "pool has no SOL side" };
+
+    try {
+      const txs = await dlmm.removeLiquidity({
+        position: new PublicKey(position.positionAddress),
+        user: this.wallet.publicKey,
+        fromBinId: position.minBinId,
+        toBinId: position.maxBinId,
+        bps: new BN(10_000),
+        shouldClaimAndClose: true,
+      });
+      for (const tx of txs) {
+        await sendAndConfirmTransaction(this.connection, tx, [this.wallet]);
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "remove failed";
+      return { ok: false, flat: false, reason };
+    }
+
+    let memeAmount = 0n;
+    try {
+      memeAmount = await this.rawBalance(position.tokenMint);
+    } catch {
+      return { ok: false, flat: true, reason: "balance read failed" };
+    }
+
+    let solLamports = 0n;
+    try {
+      const wallet = await this.connection.getBalance(this.wallet.publicKey, "confirmed");
+      const spare = BigInt(Math.max(0, wallet - SOL_RESERVE_LAMPORTS));
+      solLamports = snap.solLamports < spare ? snap.solLamports : spare;
+    } catch {
+      solLamports = 0n;
+    }
+    if (memeAmount <= DUST_RAW && solLamports <= DUST_RAW) {
+      return { ok: false, flat: true, reason: "fill left no meme" };
+    }
+
+    const xAmount = (memeIsX ? memeAmount : 0n) + (solIsY ? 0n : solLamports);
+    const yAmount = (memeIsY ? memeAmount : 0n) + (solIsY ? solLamports : 0n);
+    const positionKp = Keypair.generate();
+    try {
+      const tx = await dlmm.initializePositionAndAddLiquidityByStrategy({
+        positionPubKey: positionKp.publicKey,
+        user: this.wallet.publicKey,
+        totalXAmount: new BN(xAmount.toString()),
+        totalYAmount: new BN(yAmount.toString()),
+        strategy: {
+          minBinId: active.binId,
+          maxBinId: active.binId,
+          strategyType: StrategyType.Spot,
+        },
+        slippage: 1,
+      });
+      const signature = await sendAndConfirmTransaction(this.connection, tx, [this.wallet, positionKp]);
+      return {
+        ok: true,
+        positionAddress: positionKp.publicKey.toBase58(),
+        minBinId: active.binId,
+        maxBinId: active.binId,
+        signature,
+        solDeployed: position.solDeployed,
+      };
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "redeposit failed";
+      return { ok: false, flat: true, reason };
+    }
+  }
+
   async exit(position: ActivePosition, reason: string): Promise<string> {
     console.log(`[exit] ${position.poolName} reason=${reason}`);
 

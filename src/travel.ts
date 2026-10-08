@@ -76,7 +76,7 @@ export function feePerBin(pool: { baseFeePct?: number; binTapeNet?: number }): n
   return fee / Math.max(net, 0.25);
 }
 
-const THROUGH = /scratch|tape turned|divergence|risk budget|left the range|left the fee list|bid left behind|chop ended/;
+const THROUGH = /scratch|tape turned|divergence|risk budget|left the range|left the fee list|bid left behind|ask left behind|chop ended|switch failed/;
 
 /** Sleep the mint after a run-through. A dust atom still inside the bin can be checked again. */
 export function mintShouldSleep(reason: string, activeId: number | undefined, minBinId: number): boolean {

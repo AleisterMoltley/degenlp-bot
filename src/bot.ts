@@ -12,7 +12,7 @@ import { mergeWatched, watchedMemePools } from "./watched.js";
 import { accrueFees, entryCostUsd, fillShare, markIlUsd, oneBinBidIl, priceBand } from "./pnl.js";
 import { hydratePosition } from "./position.js";
 import { measureRpcLatency, ProofNetworkTelemetry } from "./proofnetwork.js";
-import { chopConfirmed, chopStillPays, offBinSlidePays, planFleet, coolsOff, downwardMove, type FleetOpen, type FleetPlan } from "./fleet.js";
+import { chopConfirmed, chopStillPays, inPoolSwitch, offBinSlidePays, planFleet, coolsOff, downwardMove, type FleetOpen, type FleetPlan } from "./fleet.js";
 import { depositFloorLamports } from "./jupiter.js";
 import { decide, planToCheck, type Plan } from "./scorer.js";
 import { ensureGrowth, loadState, saveState, type BotState, type GrowthLedger } from "./state.js";
@@ -246,7 +246,7 @@ export class DegenLpBot {
       plan.opens.length && plan.closes.length ? "rotate" :
       plan.opens.length ? "enter" :
       plan.closes.length ? "exit" :
-      plan.slides.length || plan.adds.length ? "adjust" :
+      plan.slides.length || plan.switches.length || plan.adds.length ? "adjust" :
       this.state.seats.length ? "stay" : "wait";
     return {
       poolAddress: pool?.poolAddress ?? seat?.poolAddress ?? "none",
@@ -501,6 +501,8 @@ export class DegenLpBot {
         // A failed read keeps the previous share. Booking the whole seat on a
         // dust fill would shrink the next size below the wallet.
         seat.fillFraction = filled ? fillShare(snap.solLamports, seat.solDeployed) : 0;
+        // The buy paid the ask. The position is SOL again, back on the bid.
+        if (seat.pose === "ask" && !filled) seat.pose = "bid";
       } catch {
         console.error("[fill] position read failed");
       }
@@ -670,6 +672,12 @@ export class DegenLpBot {
       if (!seat) continue;
       const pool = this.lastPools.find((row) => row.poolAddress === seat.poolAddress);
       await this.slideSeat(seat, pool);
+    }
+    for (const move of plan.switches) {
+      const seat = this.state.seats.find((row) => row.id === move.id);
+      if (!seat || seat.pose === "ask") continue;
+      const pool = this.lastPools.find((row) => row.poolAddress === seat.poolAddress);
+      await this.switchSeat(seat, pool, move.reason);
     }
     for (const close of plan.closes) {
       const seat = this.state.seats.find((row) => row.id === close.id);
@@ -951,7 +959,20 @@ export class DegenLpBot {
           continue;
         }
       }
-      if (cycle === "leave" && seat.filled === true) {
+      if (cycle === "leave" && seat.filled === true && seat.pose === "ask") {
+        const pool = this.lastPools.find((row) => row.poolAddress === poolAddress);
+        if (pool && chopStillPays(pool)) {
+          seat.touched = true;
+          console.log(`[fill] ${seat.poolName} ask waits above bin ${seat.maxBinId} active ${activeId}`);
+          continue;
+        }
+        console.log(`[fill] ${seat.poolName} ask left behind bin ${seat.maxBinId} active ${activeId}`);
+        await this.closeSeat(seat, "ask left behind", "exit");
+        continue;
+      }
+      if (cycle === "leave" && seat.filled === true && seat.pose !== "ask") {
+        const switched = await this.maybeSwitchToAsk(seat, activeId);
+        if (switched) continue;
         const binsUp = activeId - seat.maxBinId;
         const pool = this.lastPools.find((row) => row.poolAddress === poolAddress);
         const unwind = Math.max(config.swapBps, 300);
@@ -1025,6 +1046,97 @@ export class DegenLpBot {
     console.log(`[fill] ${seat.poolName} slide into active bin from ${seat.maxBinId}`);
     await this.slideSeat(seat, pool);
     return true;
+  }
+
+  /**
+   * One move of a fill onto the active bin.
+   * Ask: the next buy pays the fee. Lift: the SOL still in the seat follows the bin.
+   * Returns false when the resting fill is the better seat.
+   */
+  private async maybeSwitchToAsk(seat: ActivePosition, activeId: number): Promise<boolean> {
+    const pool = this.lastPools.find((row) => row.poolAddress === seat.poolAddress);
+    if (!pool) return false;
+    const kind = inPoolSwitch({
+      pool,
+      solDeployed: seat.solDeployed,
+      fillFraction: seat.fillFraction,
+      filled: seat.filled === true,
+      pose: seat.pose,
+      switches: seat.switches,
+      binsUp: activeId - seat.maxBinId,
+      boardDown: this.boardIsDown(this.lastPools, Date.now()),
+    });
+    if (!kind) return false;
+    const reason = kind === "ask" ? "switch the fill into the active ask" : "lift the SOL bid into the active bin";
+    console.log(`[fill] ${seat.poolName} ${reason} from ${seat.maxBinId}`);
+    await this.switchSeat(seat, pool, reason);
+    return true;
+  }
+
+  /** Move a fill onto the active bin. A failed redeposit closes once, without a second remove. */
+  private switchSeat(seat: ActivePosition, pool: PoolCandidate | undefined, reason: string): Promise<void> {
+    const existing = this.slideFlight.get(seat.id);
+    if (existing) return existing;
+    const flight = this.finishSwitch(seat, pool, reason).finally(() => {
+      this.slideFlight.delete(seat.id);
+    });
+    this.slideFlight.set(seat.id, flight);
+    return flight;
+  }
+
+  private async finishSwitch(seat: ActivePosition, pool: PoolCandidate | undefined, reason: string): Promise<void> {
+    if (this.exitFlight.has(seat.id)) return;
+    if (seat.pose === "ask" || (seat.switches ?? 0) >= 1) return;
+    const now = Date.now();
+    if (now - (seat.slidAt ?? 0) < 60_000) return;
+
+    const step = Math.max(seat.binStep || pool?.binStep || 80, 1) / 10_000;
+    const price = pool?.priceUsd && pool.priceUsd > 0 ? pool.priceUsd : seat.entryPrice * (1 + step * 2);
+    const lift = reason.startsWith("lift");
+
+    if (!config.dryRun && this.executor) {
+      const result = await this.executor.switchFillToAsk(seat);
+      if (!result.ok) {
+        if (result.flat) {
+          seat.costsUsd += config.txCostUsd;
+          await this.closeSeat(seat, "switch failed; fill removed", "exit", true);
+        } else {
+          console.error(`[switch] ${seat.poolName} skipped: ${result.reason}`);
+        }
+        return;
+      }
+      seat.positionAddress = result.positionAddress;
+      seat.minBinId = result.minBinId;
+      seat.maxBinId = result.maxBinId;
+      seat.entrySignature = result.signature;
+    } else {
+      const active = this.lastActiveId.get(seat.poolAddress);
+      const next = active != null && active > seat.maxBinId ? active : seat.maxBinId + 2;
+      seat.minBinId = next;
+      seat.maxBinId = next;
+      console.log(`[dry-run switch] ${seat.poolName} bin ${next}`);
+    }
+
+    if (lift) {
+      const band = priceBand(price, seat.rangeHalfWidth || 0.06, "bid");
+      seat.pose = "bid";
+      seat.entryPrice = price;
+      seat.priceLower = band.lower;
+      seat.priceUpper = band.upper;
+    } else {
+      seat.pose = "ask";
+    }
+    seat.askPrice = price;
+    seat.lastPrice = price;
+    seat.filled = true;
+    seat.touched = true;
+    seat.switches = (seat.switches ?? 0) + 1;
+    seat.slidAt = now;
+    seat.costsUsd += config.txCostUsd * 2;
+    this.state.book.adjusts += 1;
+    this.syncActive();
+    saveState(this.state);
+    console.log(`[switch] ${seat.poolName} ${lift ? "lift" : "ask"} bin ${seat.maxBinId}`);
   }
 
   /** Step a SOL bid up one bin. A failed redeposit closes the seat without removing it twice. */

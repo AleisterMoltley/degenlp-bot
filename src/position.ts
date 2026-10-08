@@ -75,5 +75,7 @@ export function hydratePosition(pos: ActivePosition): ActivePosition {
     solPrice: pos.solPrice || 0,
     scanMisses: pos.scanMisses ?? 0,
     slides: pos.slides ?? 0,
+    pose: pos.pose === "ask" ? "ask" : "bid",
+    switches: pos.switches ?? 0,
   };
 }
