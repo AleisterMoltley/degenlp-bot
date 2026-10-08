@@ -34,3 +34,33 @@ export function activeIdsFromAccounts(
 export function bidTouched(activeId: number, maxBinId: number): boolean {
   return Number.isInteger(activeId) && Number.isInteger(maxBinId) && activeId <= maxBinId;
 }
+
+export type BidCycle = "wait" | "hold" | "bank" | "scratch";
+
+/**
+ * One-bin SOL bid.
+ * Above the bin, still untouched: wait.
+ * On the bin: hold. The pool's reverse swap is the exit.
+ * Back above after a fill: bank. The position is SOL again.
+ * Below the bin: scratch. The reverse swap did not come.
+ */
+export function bidCycle(
+  activeId: number,
+  minBinId: number,
+  maxBinId: number,
+  seenFill: boolean,
+): BidCycle {
+  if (!Number.isInteger(activeId) || !Number.isInteger(minBinId) || !Number.isInteger(maxBinId)) {
+    return "wait";
+  }
+  if (activeId < minBinId) return "scratch";
+  if (activeId > maxBinId) return seenFill ? "bank" : "wait";
+  return "hold";
+}
+
+/** Price stand-in when the scan has no bin id. Past the bid, short of a clean two-bin break. */
+export function dipThrough(price: number, entry: number, binStep: number): boolean {
+  if (!(price > 0) || !(entry > 0)) return false;
+  const step = Math.max(binStep, 1) / 10_000;
+  return price <= entry * (1 - step * 1.5);
+}

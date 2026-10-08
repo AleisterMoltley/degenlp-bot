@@ -212,7 +212,7 @@ test("a skim that never pays is closed when the window ends", () => {
   assert.match(plan.closes[0].reason, /skim window closed/);
 });
 
-test("a skim inside the band still takes the 12% cut", () => {
+test("a dip that stays inside the bid waits for the round trip", () => {
   const plan = planFleet({
     pools: [pool({ priceUsd: 0.9905 })],
     seats: [
@@ -232,8 +232,8 @@ test("a skim inside the band still takes the 12% cut", () => {
     now,
     lossCut: 0.12,
   });
-  assert.equal(plan.closes.length, 1);
-  assert.match(plan.closes[0].reason, /risk budget/);
+  assert.equal(plan.closes.length, 0, plan.closes.map((row) => row.reason).join(","));
+  assert.match(plan.holds[0]?.reason ?? "", /round trip/);
 });
 
 test("a core bid is not scratched on the first bin", () => {
@@ -371,16 +371,42 @@ test("a falling board opens nothing and still scratches a fill", () => {
   assert.match(scratch.closes[0].reason, /scratched the fill/);
 });
 
-test("the first meme atom closes before the scratch price", () => {
-  const plan = planFleet({
-    pools: [pool({ priceUsd: 1 })],
-    seats: [seat({ filled: true, enteredAt: now - 10_000, entryPrice: 1, lastPrice: 1 })],
+test("a fill inside the bid waits, and the way back to SOL banks", () => {
+  const inside = planFleet({
+    pools: [pool({ priceUsd: 0.992 })],
+    seats: [
+      seat({
+        filled: true,
+        touched: true,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 0.992,
+        binStep: 100,
+      }),
+    ],
     deploySol: 0.72,
     now,
   });
-  assert.equal(plan.closes.length, 1);
-  assert.equal(plan.closes[0].reason, "first meme atom");
-  assert.doesNotMatch(plan.closes[0].reason, /remains in the wallet/);
+  assert.equal(inside.closes.length, 0, inside.closes.map((row) => row.reason).join(","));
+  assert.match(inside.holds[0]?.reason ?? "", /round trip/);
+
+  const back = planFleet({
+    pools: [pool({ priceUsd: 1 })],
+    seats: [
+      seat({
+        filled: false,
+        touched: true,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(back.closes.length, 1);
+  assert.equal(back.closes[0].reason, "round trip back to SOL");
 });
 
 test("a watched meme stays on the scanner and does not skip the gate", () => {
@@ -437,7 +463,7 @@ test("a falling tape and a wide bin block the entry", () => {
   assert.equal(wide.preview[0]?.strategy, "tape");
 });
 
-test("a fast tape leaves at half a bin and a calm tape does not", () => {
+test("a fast tape that only reaches the bid waits for the round trip", () => {
   const fast = planFleet({
     pools: [pool({ priceUsd: 0.994 })],
     seats: [seat({ enteredAt: now - 10_000, binStep: 100 })],
@@ -445,8 +471,8 @@ test("a fast tape leaves at half a bin and a calm tape does not", () => {
     now,
     moves: { "pool-a": 0.025 },
   });
-  assert.equal(fast.closes.length, 1);
-  assert.match(fast.closes[0].reason, /tape turned on the bid/);
+  assert.equal(fast.closes.length, 0, fast.closes.map((row) => row.reason).join(","));
+  assert.match(fast.holds[0]?.reason ?? "", /round trip/);
 
   const calm = planFleet({
     pools: [pool({ priceUsd: 0.994 })],

@@ -2,7 +2,7 @@ import { buildCandidates, fetchOriginalOpportunityChecks, fetchTopPumpTokens } f
 import { config } from "./config.js";
 import { bankableUsd } from "./edge.js";
 import { chopFromPrices } from "./chop.js";
-import { bidTouched } from "./fillwatch.js";
+import { bidCycle } from "./fillwatch.js";
 import { binTapeFromIds, feeRateClears, mintShouldSleep, priceBinId } from "./travel.js";
 import { deploySolFor, equitySol, paceSol } from "./growth.js";
 import { DlmmExecutor, enterPositionDryRun } from "./executor.js";
@@ -192,6 +192,11 @@ export class DegenLpBot {
       freezeOpens: now < this.freezeUntil,
       boardDown: this.boardIsDown(candidates, now),
     });
+    for (const hold of plan.holds) {
+      if (hold.reason !== "waiting for the round trip") continue;
+      const seat = this.state.seats.find((row) => row.id === hold.id);
+      if (seat) seat.touched = true;
+    }
     this.lastTopCandidates = plan.preview.map((row) => ({
       poolName: row.poolName,
       tokenSymbol: row.tokenSymbol,
@@ -449,6 +454,7 @@ export class DegenLpBot {
       try {
         const raw = await this.executor.positionMemeRaw(seat.poolAddress, seat.positionAddress, seat.tokenMint);
         seat.filled = raw > 0n;
+        if (raw > 0n) seat.touched = true;
       } catch {
         console.error("[fill] position read failed");
       }
@@ -811,16 +817,21 @@ export class DegenLpBot {
 
   private async onActiveBin(poolAddress: string, activeId: number): Promise<void> {
     this.lastActiveId.set(poolAddress, activeId);
-    const hit = this.state.seats.filter(
-      (seat) =>
-        seat.poolAddress === poolAddress &&
-        seat.side === "bid" &&
-        seat.minBinId === seat.maxBinId &&
-        bidTouched(activeId, seat.maxBinId),
+    const seats = this.state.seats.filter(
+      (seat) => seat.poolAddress === poolAddress && seat.side === "bid" && seat.minBinId === seat.maxBinId,
     );
-    for (const seat of hit) {
-      console.log(`[fill] ${seat.poolName} bin ${seat.maxBinId} active ${activeId}`);
-      await this.closeSeat(seat, "first meme atom", "exit");
+    for (const seat of seats) {
+      const cycle = bidCycle(activeId, seat.minBinId, seat.maxBinId, seat.touched === true || seat.filled === true);
+      if (cycle === "wait") continue;
+      if (cycle === "hold") {
+        seat.touched = true;
+        seat.filled = true;
+        console.log(`[fill] ${seat.poolName} holding bin ${seat.maxBinId} active ${activeId}`);
+        continue;
+      }
+      const reason = cycle === "bank" ? "round trip back to SOL" : "scratched the fill";
+      console.log(`[fill] ${seat.poolName} ${reason} bin ${seat.maxBinId} active ${activeId}`);
+      await this.closeSeat(seat, reason, "exit");
     }
   }
 

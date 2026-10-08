@@ -2,6 +2,7 @@ import { chopShapeOk, depthOk } from "./chop.js";
 import { config } from "./config.js";
 import { bankableUsd, trailGaveBack } from "./edge.js";
 import { halfWidthFromBins, markIlUsd } from "./pnl.js";
+import { dipThrough } from "./fillwatch.js";
 import { feePerBin, feeRateClears, microChopOk } from "./travel.js";
 import { computeMetrics, planPosition, rankPools, type Metrics } from "./scorer.js";
 import type { ActivePosition, BotDecision, PoolCandidate } from "./types.js";
@@ -224,10 +225,6 @@ export function planFleet(args: {
   let coreReopen: FleetOpen | null = null;
 
   for (const seat of args.seats) {
-    if (seat.filled) {
-      closes.push({ id: seat.id, action: "exit", reason: "first meme atom" });
-      continue;
-    }
     const pool = args.pools.find((row) => row.poolAddress === seat.poolAddress);
     if (!pool) {
       if ((seat.scanMisses ?? 0) >= 4) {
@@ -242,6 +239,32 @@ export function planFleet(args: {
     const step = Math.max(seat.binStep || pool.binStep || 80, 1) / 10_000;
     const drop = dropOf(pool, args.moves);
     const fast = drop >= Math.max(step, 0.01);
+    const oneBinSkim = isSkim(seat) && seat.minBinId === seat.maxBinId && seat.entryPrice > 0;
+    // The fee arrives on the way into the bin and again on the way out. Selling
+    // the meme on the way in pays the dump. A break past the bid still leaves.
+    if (oneBinSkim && dipThrough(price, seat.entryPrice, seat.binStep || pool.binStep || 80)) {
+      closes.push({ id: seat.id, action: "exit", reason: "scratched the fill" });
+      continue;
+    }
+    if (oneBinSkim && seat.touched && !seat.filled && price >= seat.entryPrice) {
+      closes.push({ id: seat.id, action: "exit", reason: "round trip back to SOL" });
+      continue;
+    }
+    if (oneBinSkim && price < seat.entryPrice) {
+      const held = args.now - seat.enteredAt;
+      if (held >= config.fleetMaxLifeMs) {
+        const liveIl = seatIl(seat, pool, price);
+        const bankable = bankableUsd(seat.feesAccruedUsd, liveIl, seat.costsUsd, config.txCostUsd);
+        closes.push({
+          id: seat.id,
+          action: "exit",
+          reason: bankable >= 0 ? "skim window banked" : "skim window closed",
+        });
+        continue;
+      }
+      holds.push({ id: seat.id, reason: "waiting for the round trip" });
+      continue;
+    }
     if (seat.side === "bid" && seat.entryPrice > 0) {
       if (isSkim(seat) && price <= seat.entryPrice * (1 - step)) {
         closes.push({ id: seat.id, action: "exit", reason: "scratched the fill" });

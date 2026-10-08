@@ -65,8 +65,10 @@ export interface ActivePosition {
   priceUpper: number;
   solPrice: number;
   scanMisses?: number;
-  /** On-chain meme balance appeared. The seat leaves on the next plan. */
+  /** Meme is in the position right now. */
   filled?: boolean;
+  /** This bid was filled at least once. Stays set after the meme converts back to SOL. */
+  touched?: boolean;
   exitReason?: string;
   exitedAt?: number;
 }
