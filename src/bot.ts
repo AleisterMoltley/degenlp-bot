@@ -13,6 +13,7 @@ import { accrueFees, entryCostUsd, fillShare, markIlUsd, oneBinBidIl, priceBand 
 import { hydratePosition } from "./position.js";
 import { measureRpcLatency, ProofNetworkTelemetry } from "./proofnetwork.js";
 import { chopConfirmed, chopStillPays, offBinSlidePays, planFleet, coolsOff, downwardMove, type FleetOpen, type FleetPlan } from "./fleet.js";
+import { depositFloorLamports } from "./jupiter.js";
 import { decide, planToCheck, type Plan } from "./scorer.js";
 import { ensureGrowth, loadState, saveState, type BotState, type GrowthLedger } from "./state.js";
 import type { ActivePosition, BotDecision, OpportunityCheck, PoolCandidate } from "./types.js";
@@ -103,6 +104,8 @@ export class DegenLpBot {
   private lastScanMs = 0;
   private poolCounts = { dlmm: 0, damm_v2: 0, damm_v1: 0 };
   private cooloff = new Map<string, number>();
+  /** Converted SOL that a later sweep must still return before it sells the meme. */
+  private solFloor = new Map<string, bigint>();
   private deploySol = config.solDeploy;
   private walletPublicKey: string | null = null;
   private kick = false;
@@ -729,8 +732,14 @@ export class DegenLpBot {
         const exists = await this.executor.positionExists(active.positionAddress);
         sig = await this.executor.exit(active, exists ? reason : "Position not found on-chain - already closed");
       }
-      const settled = await this.executor.settleMeme(active.tokenMint, active.poolAddress);
-      if (settled === "swapped") active.costsUsd += config.txCostUsd;
+      const floor = depositFloorLamports(active.solDeployed, active.filled === true, active.fillFraction);
+      if (floor > 0n) this.solFloor.set(active.tokenMint, floor);
+      const settled = await this.executor.settleMeme(active.tokenMint, active.poolAddress, floor);
+      if (settled === "swapped") {
+        active.costsUsd += config.txCostUsd;
+        this.solFloor.delete(active.tokenMint);
+      }
+      if (settled === "flat") this.solFloor.delete(active.tokenMint);
       if (settled === "stuck") this.cooloff.set(active.poolAddress, Date.now() + 15 * 60_000);
     } else {
       console.log(`[dry-run exit] ${active.venue} ${active.poolName} ${reason}`);
@@ -1237,9 +1246,12 @@ export class DegenLpBot {
     const now = Date.now();
     for (const row of rows) {
       if ((this.sweepHold.get(row.mint) ?? 0) > now) continue;
-      const settled = await this.executor.settleMeme(row.mint);
-      if (settled === "swapped") this.sweepHold.delete(row.mint);
-      else if (settled === "stuck") this.sweepHold.set(row.mint, now + 15_000);
+      const floor = this.solFloor.get(row.mint) ?? 0n;
+      const settled = await this.executor.settleMeme(row.mint, undefined, floor);
+      if (settled === "swapped" || settled === "flat") {
+        this.sweepHold.delete(row.mint);
+        this.solFloor.delete(row.mint);
+      } else if (settled === "stuck") this.sweepHold.set(row.mint, now + 15_000);
     }
   }
 

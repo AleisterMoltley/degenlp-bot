@@ -11,6 +11,35 @@ export const UNWIND_ATTEMPTS = [
   { slippageBps: 800, maxImpact: 0.08 },
 ] as const;
 
+/**
+ * Worst SOL the route can return after its slippage. The quote's outAmount is
+ * the ideal fill. The transaction may land this far under it.
+ */
+export function minOutLamports(outAmount: bigint, slippageBps: number): bigint {
+  if (outAmount <= 0n) return 0n;
+  const bps = BigInt(Math.max(0, Math.min(10_000, Math.floor(slippageBps))));
+  return (outAmount * (10_000n - bps)) / 10_000n;
+}
+
+/**
+ * SOL that was converted to meme and has to come back before a swap is sent.
+ * A missing fraction on a fill is the whole seat. An unfilled bid has no floor.
+ * Clearing the floor is not a profit: the transactions are still paid, and a
+ * quote that never clears can leave the meme to go to zero.
+ */
+export function depositFloorLamports(solDeployed: number, filled: boolean, fillFraction?: number): bigint {
+  if (!filled || !(solDeployed > 0) || !Number.isFinite(solDeployed)) return 0n;
+  const frac = fillFraction == null || !Number.isFinite(fillFraction) ? 1 : Math.min(1, Math.max(0, fillFraction));
+  if (!(frac > 0)) return 0n;
+  return BigInt(Math.floor(solDeployed * frac * 1e9));
+}
+
+/** True when the worst fill still returns the converted SOL. No floor means an unknown bag. */
+export function outClearsDeposit(minOut: bigint, deployedLamports: bigint): boolean {
+  if (deployedLamports <= 0n) return true;
+  return minOut >= deployedLamports;
+}
+
 const JUPITER = "https://lite-api.jup.ag/swap/v1";
 
 export interface SwapQuote {

@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { bs58 } from "@coral-xyz/anchor/dist/cjs/utils/bytes";
 import { Keypair } from "@solana/web3.js";
-import { assertSwapQuote, quoteFailure, sellSlices, UNWIND_ATTEMPTS } from "./jupiter.js";
+import { assertSwapQuote, depositFloorLamports, minOutLamports, outClearsDeposit, quoteFailure, sellSlices, UNWIND_ATTEMPTS } from "./jupiter.js";
 import { capDeploySol, parseWalletSecret, saveWalletSecret } from "./wallet.js";
 
 test("a base58 secret and a json byte array resolve to the same public key", () => {
@@ -25,6 +25,17 @@ test("capDeploySol keeps a fee reserve and refuses a dust wallet", () => {
   assert.equal(capDeploySol(0.72, 1_000_000_000), 0.72);
   assert.equal(capDeploySol(0.72, 200_000_000), 0.15);
   assert.throws(() => capDeploySol(0.72, 80_000_000), /fee reserve/);
+});
+
+test("a swap under the converted SOL is refused", () => {
+  assert.equal(depositFloorLamports(0.5, true), 500_000_000n);
+  assert.equal(depositFloorLamports(0.5, true, 0.25), 125_000_000n);
+  assert.equal(depositFloorLamports(0.5, false, 1), 0n);
+  assert.equal(minOutLamports(1_000_000_000n, 300), 970_000_000n);
+  assert.equal(outClearsDeposit(1_000_000_000n, 1_000_000_000n), true);
+  assert.equal(outClearsDeposit(999_999_999n, 1_000_000_000n), false);
+  assert.equal(outClearsDeposit(1n, 0n), true);
+  assert.equal(outClearsDeposit(minOutLamports(1_000_000_000n, 300), 1_000_000_000n), false);
 });
 
 test("an unwind stops at 8% impact", () => {

@@ -11,7 +11,7 @@ import {
 import BN from "bn.js";
 import { config } from "./config.js";
 import { activeIdFromPool, activeIdsFromAccounts } from "./fillwatch.js";
-import { buildJupiterSwap, sellSlices, SOL_MINT, UNWIND_ATTEMPTS } from "./jupiter.js";
+import { buildJupiterSwap, minOutLamports, outClearsDeposit, sellSlices, SOL_MINT, UNWIND_ATTEMPTS } from "./jupiter.js";
 import { buildPosition } from "./position.js";
 import type { ActivePosition, OpportunityCheck, PoolCandidate } from "./types.js";
 
@@ -388,8 +388,12 @@ export class DlmmExecutor {
     return [...totals.entries()].map(([mint, amount]) => ({ mint, amount }));
   }
 
-  /** After a bid or curve is removed, sell a leftover meme back to SOL. A failed unwind does not pause the desk. */
-  async settleMeme(mint: string, poolAddress?: string): Promise<"flat" | "swapped" | "stuck"> {
+  /**
+   * After a bid or curve is removed, sell a leftover meme back to SOL.
+   * floorLamports is the SOL that was converted. A quote whose worst fill is
+   * under that floor is not sent. A failed unwind does not pause the desk.
+   */
+  async settleMeme(mint: string, poolAddress?: string, floorLamports = 0n): Promise<"flat" | "swapped" | "stuck"> {
     if (!mint || mint === SOL_MINT) return "flat";
     let amount = 0n;
     try {
@@ -400,7 +404,7 @@ export class DlmmExecutor {
     }
     if (amount <= 0n) return "flat";
     try {
-      await this.swapToSol(mint, amount, poolAddress);
+      await this.swapToSol(mint, amount, poolAddress, floorLamports);
       return "swapped";
     } catch (err) {
       const msg = err instanceof Error ? err.message : "unwind failed";
@@ -409,11 +413,11 @@ export class DlmmExecutor {
     }
   }
 
-  private async swapToSol(inputMint: string, amount: bigint, poolAddress?: string): Promise<void> {
+  private async swapToSol(inputMint: string, amount: bigint, poolAddress?: string, floorLamports = 0n): Promise<void> {
     let last = "unwind failed";
     const soldOnJupiter = await this.sellThroughJupiter(inputMint, amount, (msg) => {
       last = msg;
-    });
+    }, floorLamports);
     if (soldOnJupiter) return;
     let left = await this.rawBalance(inputMint);
     if (left <= 0n) return;
@@ -422,7 +426,7 @@ export class DlmmExecutor {
       return;
     }
     try {
-      await this.sellThroughDlmm(inputMint, left, poolAddress);
+      await this.sellThroughDlmm(inputMint, left, poolAddress, floorLamports);
       left = await this.rawBalance(inputMint);
       if (left <= 0n) return;
     } catch (err) {
@@ -442,9 +446,13 @@ export class DlmmExecutor {
     inputMint: string,
     amount: bigint,
     onError: (msg: string) => void,
+    floorLamports = 0n,
   ): Promise<boolean> {
     let left = amount;
-    for (const slice of sellSlices(amount)) {
+    // A partial slice cannot return the converted SOL. With a floor, only the
+    // full bag and the one-raw transfer-fee nudge are tried.
+    const slices = floorLamports > 0n ? sellSlices(amount).filter((slice) => slice + 1n >= amount) : sellSlices(amount);
+    for (const slice of slices) {
       if (left <= 0n) return true;
       const use = slice > left ? left : slice;
       for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -452,7 +460,7 @@ export class DlmmExecutor {
         if (before <= 0n) return true;
         const sized = use > before ? before : use;
         try {
-          await this.sendMemeSell(inputMint, sized);
+          await this.sendMemeSell(inputMint, sized, floorLamports);
           left = await this.rawBalance(inputMint);
           if (left <= 0n) return true;
           break;
@@ -481,7 +489,7 @@ export class DlmmExecutor {
    * after simulateTransaction has accepted the same signed transaction.
    * Simulate first, then send with preflight skipped.
    */
-  private async sendMemeSell(inputMint: string, amount: bigint): Promise<void> {
+  private async sendMemeSell(inputMint: string, amount: bigint, floorLamports = 0n): Promise<void> {
     let last = "unwind failed";
     for (const attempt of UNWIND_ATTEMPTS) {
       let built: Awaited<ReturnType<typeof buildJupiterSwap>>;
@@ -496,6 +504,17 @@ export class DlmmExecutor {
         });
       } catch (err) {
         last = err instanceof Error ? err.message : last;
+        continue;
+      }
+      let quoted = 0n;
+      try {
+        quoted = BigInt(built.outAmount || "0");
+      } catch {
+        quoted = 0n;
+      }
+      const worst = minOutLamports(quoted, attempt.slippageBps);
+      if (!outClearsDeposit(worst, floorLamports)) {
+        last = "unwind quote is below the SOL deposited";
         continue;
       }
       const tx = VersionedTransaction.deserialize(Buffer.from(built.swapTransaction, "base64"));
@@ -548,7 +567,7 @@ export class DlmmExecutor {
   }
 
   /** The pool we just left, then any other SOL pair for this mint. */
-  private async sellThroughDlmm(mint: string, amount: bigint, poolAddress?: string): Promise<void> {
+  private async sellThroughDlmm(mint: string, amount: bigint, poolAddress?: string, floorLamports = 0n): Promise<void> {
     const pools = await this.solPoolsForMint(mint, poolAddress);
     if (!pools.length) throw new Error("no SOL pool to unwind the meme");
     let left = amount;
@@ -558,7 +577,7 @@ export class DlmmExecutor {
       for (let pass = 0; pass < 4 && left > 0n; pass += 1) {
         const before = left;
         try {
-          await this.swapOnDlmm(pool, mint, left);
+          await this.swapOnDlmm(pool, mint, left, floorLamports);
         } catch (err) {
           last = err instanceof Error ? err.message : last;
           break;
@@ -600,7 +619,7 @@ export class DlmmExecutor {
     return found.slice(0, 3);
   }
 
-  private async swapOnDlmm(poolAddress: string, mint: string, amount: bigint): Promise<void> {
+  private async swapOnDlmm(poolAddress: string, mint: string, amount: bigint, floorLamports = 0n): Promise<void> {
     const dlmm = await DLMM.create(this.connection, new PublicKey(poolAddress));
     const memeIsX = dlmm.tokenX.publicKey.toBase58() === mint;
     const other = memeIsX ? dlmm.tokenY.publicKey.toBase58() : dlmm.tokenX.publicKey.toBase58();
@@ -613,6 +632,9 @@ export class DlmmExecutor {
     if (!quote.outAmount || quote.outAmount.lten(0)) throw new Error("dlmm quote was empty");
     const inAmount = quote.consumedInAmount?.gtn(0) ? quote.consumedInAmount : new BN(amount.toString());
     const minOut = quote.minOutAmount?.gtn(0) ? quote.minOutAmount : new BN(1);
+    if (!outClearsDeposit(BigInt(minOut.toString()), floorLamports)) {
+      throw new Error("unwind quote is below the SOL deposited");
+    }
     const tx = await dlmm.swap({
       inToken: new PublicKey(mint),
       outToken: new PublicKey(SOL_MINT),
