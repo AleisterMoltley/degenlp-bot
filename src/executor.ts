@@ -10,7 +10,7 @@ import {
 } from "@solana/web3.js";
 import BN from "bn.js";
 import { config } from "./config.js";
-import { activeIdFromPool, activeIdsFromAccounts } from "./fillwatch.js";
+import { activeIdFromPool, activeIdsFromAccounts, MAX_SOL_HOP_BINS } from "./fillwatch.js";
 import { buildJupiterSwap, minOutLamports, outClearsDeposit, sellSlices, SOL_MINT, UNWIND_ATTEMPTS } from "./jupiter.js";
 import { buildPosition } from "./position.js";
 import type { ActivePosition, OpportunityCheck, PoolCandidate } from "./types.js";
@@ -278,7 +278,8 @@ export class DlmmExecutor {
   }
 
   /**
-   * Move a one-bin SOL bid onto the active bin, one step up or down.
+   * Move a one-bin SOL bid onto the active bin.
+   * Up to two bins above, or one bin below. Farther is a runner.
    * Refuses while the meme is still in the position.
    * If the remove lands and the new deposit does not, the seat is flat and the caller must not exit again.
    */
@@ -290,12 +291,12 @@ export class DlmmExecutor {
     const poolPk = new PublicKey(position.poolAddress);
     const dlmm = await DLMM.create(this.connection, poolPk);
     const active = await dlmm.getActiveBin();
-    // One step onto the active bin, up or down. A bin that is not active does
-    // not get the swap. Two steps either way is a runner.
+    // Land on the active bin. One bin below is the old step. Up to two bins
+    // above costs the same two transactions and earns the sell. Farther is a runner.
     const next = active.binId;
     const delta = next - position.maxBinId;
     if (delta === 0) return { ok: false, flat: false, reason: "price came back" };
-    if (delta !== 1 && delta !== -1) return { ok: false, flat: false, reason: "runner" };
+    if (delta < -1 || delta > MAX_SOL_HOP_BINS) return { ok: false, flat: false, reason: "runner" };
 
     const tokenX = dlmm.tokenX.publicKey.toBase58();
     const tokenY = dlmm.tokenY.publicKey.toBase58();

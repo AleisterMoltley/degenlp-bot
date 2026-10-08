@@ -2,7 +2,7 @@ import { buildCandidates, fetchOriginalOpportunityChecks, fetchTopPumpTokens } f
 import { config } from "./config.js";
 import { bankableUsd, collectedFeePct, depthReadRank } from "./edge.js";
 import { chopFromPrices } from "./chop.js";
-import { bidCycle, filledShouldSell, MAX_BID_SLIDES, scratchNow } from "./fillwatch.js";
+import { bidCycle, filledShouldSell, MAX_BID_SLIDES, MAX_SOL_HOP_BINS, scratchNow } from "./fillwatch.js";
 import { binTapeFromIds, feeRateClears, mintShouldSleep, priceBinId } from "./travel.js";
 import { deploySolFor, equitySol, paceSol } from "./growth.js";
 import { DlmmExecutor, DUST_RAW, enterPositionDryRun } from "./executor.js";
@@ -959,9 +959,24 @@ export class DegenLpBot {
           continue;
         }
       }
+      if (cycle === "leave" && seat.filled !== true) {
+        // Two bins above and still SOL. The hop costs the same as one bin and
+        // lands on the bin the next sell pays. Farther than that leaves.
+        const binsUp = activeId - seat.maxBinId;
+        if (binsUp === MAX_SOL_HOP_BINS) {
+          const slid = await this.maybeSlideToActive(seat);
+          if (slid) continue;
+        }
+        console.log(`[fill] ${seat.poolName} bid left behind bin ${seat.maxBinId} active ${activeId}`);
+        await this.closeSeat(seat, "bid left behind", "exit");
+        continue;
+      }
       if (cycle === "leave" && seat.filled === true && seat.pose === "ask") {
+        const switched = await this.maybeSwitchToAsk(seat, activeId);
+        if (switched) continue;
         const pool = this.lastPools.find((row) => row.poolAddress === poolAddress);
-        if (pool && chopStillPays(pool)) {
+        const climbsLeft = (seat.switches ?? 0) < MAX_BID_SLIDES;
+        if (pool && chopStillPays(pool) && climbsLeft) {
           seat.touched = true;
           console.log(`[fill] ${seat.poolName} ask waits above bin ${seat.maxBinId} active ${activeId}`);
           continue;
@@ -1182,8 +1197,9 @@ export class DegenLpBot {
       seat.entrySignature = result.signature;
     } else {
       const active = this.lastActiveId.get(seat.poolAddress);
-      const down = active != null ? active < seat.maxBinId : price < seat.entryPrice;
-      const next = seat.maxBinId + (down ? -1 : 1);
+      const delta = active != null ? active - seat.maxBinId : price < seat.entryPrice ? -1 : 1;
+      const hop = delta !== 0 && delta >= -1 && delta <= MAX_SOL_HOP_BINS;
+      const next = seat.maxBinId + (hop ? delta : price < seat.entryPrice ? -1 : 1);
       seat.minBinId = next;
       seat.maxBinId = next;
       console.log(`[dry-run slide] ${seat.poolName} bin ${next}`);

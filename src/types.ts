@@ -69,7 +69,7 @@ export interface ActivePosition {
   pose?: "bid" | "ask";
   /** Price of the bin the bag was moved to. The original entry stays the cost basis until that buy pays. */
   askPrice?: number;
-  /** Moves of the current bag onto the active bin. One per bag, then it stays until the bag is SOL again. */
+  /** Moves of the current bag onto the active bin. A few climbs, then it stops until the bag is SOL again. */
   switches?: number;
   /** Meme is in the position right now. */
   filled?: boolean;

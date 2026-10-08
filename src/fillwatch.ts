@@ -138,6 +138,12 @@ export function binsAboveEntry(price: number, entry: number, binStep: number): n
 export const MAX_BID_SLIDES = 3;
 
 /**
+ * A still-SOL bid may land on the active bin from this many bins below it.
+ * One hop costs the same two transactions as a one-bin step. Farther is a runner.
+ */
+export const MAX_SOL_HOP_BINS = 2;
+
+/**
  * The bid is still SOL and the price has left its bin, short of a runner.
  * One step can land back in the active bin. Meme in the position does not slide.
  */

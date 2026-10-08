@@ -1003,6 +1003,42 @@ test("a deep bin is worth one slide and a bin the sell already reaches is not", 
   assert.equal(up.slides.length, 1);
   assert.match(up.slides[0].reason, /slide/);
 
+  const two = planFleet({
+    pools: [pool({ priceUsd: 1.02 })],
+    seats: [
+      seat({
+        filled: false,
+        solDeployed: 0.5,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.02,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(two.closes.length, 0, two.closes.map((row) => row.reason).join(","));
+  assert.equal(two.slides.length, 1);
+
+  const runnerHop = planFleet({
+    pools: [pool({ priceUsd: 1.05 })],
+    seats: [
+      seat({
+        filled: false,
+        solDeployed: 0.5,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.05,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(runnerHop.slides.length, 0);
+  assert.equal(runnerHop.closes[0]?.reason, "bid left behind");
+
   const reached = planFleet({
     pools: [pool({ priceUsd: 1.01, binSolUsd: 200 })],
     seats: [
@@ -1374,6 +1410,25 @@ test("a filled seat can switch onto the active bin, and only upward", () => {
   assert.equal(again.switches.length, 0);
   assert.equal(again.closes.length, 0, again.closes.map((row) => row.reason).join(","));
   assert.match(again.holds[0]?.reason ?? "", /ask waits/);
+
+  const climb = planFleet({
+    pools: [pool({ priceUsd: 1.16 })],
+    seats: [seat({ ...filled, pose: "ask", askPrice: 1.08, switches: 1 })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(climb.switches.length, 1);
+  assert.equal(climb.switches[0]?.reason, "switch the fill into the active ask");
+  assert.equal(climb.closes.length, 0, climb.closes.map((row) => row.reason).join(","));
+
+  const chasedAsk = planFleet({
+    pools: [pool({ priceUsd: 1.16 })],
+    seats: [seat({ ...filled, pose: "ask", askPrice: 1.08, switches: 3 })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(chasedAsk.switches.length, 0);
+  assert.equal(chasedAsk.closes[0]?.reason, "ask left behind");
 
   const stranded = planFleet({
     pools: [pool({ priceUsd: 0.92, chopCrossings: 0, chopNetBins: 6 })],

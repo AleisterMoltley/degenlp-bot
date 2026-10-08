@@ -2,7 +2,7 @@ import { chopShapeOk, depthOk } from "./chop.js";
 import { config } from "./config.js";
 import { bankableUsd, collectedFeePct, trailGaveBack } from "./edge.js";
 import { halfWidthFromBins, markIlUsd, oneBinBidIl } from "./pnl.js";
-import { bidLeftBehind, binsAboveEntry, filledShouldSell, MAX_BID_SLIDES } from "./fillwatch.js";
+import { bidLeftBehind, binsAboveEntry, filledShouldSell, MAX_BID_SLIDES, MAX_SOL_HOP_BINS } from "./fillwatch.js";
 import { feePerBin, feeRateClears, microChopOk } from "./travel.js";
 import { computeMetrics, planPosition, rankPools, type Metrics } from "./scorer.js";
 import type { ActivePosition, BotDecision, PoolCandidate } from "./types.js";
@@ -499,12 +499,13 @@ export function askSwitchPays(
 export type InPoolSwitch = "ask" | "lift";
 
 /**
- * The price left a filled one-bin upward. One move puts that bag on the active bin.
+ * The price left a filled one-bin upward. A climb puts that bag on the active bin.
  * Ask: the meme share's next buy clears the two transactions. The next buy pays
  * the fee and turns the meme back into SOL. SOL still in the seat moves with it.
  * Lift: that buy does not clear, but the SOL still in the seat would. The same
- * move keeps that SOL in the bin that pays. A one-bin gap stays. A dip is not a
- * switch. One move per bag. This is one pass, not a second flip, and not a promise.
+ * move keeps that SOL in the bin that pays. The bag may climb a few times while
+ * the price leaves it above. Then it stops. A one-bin gap stays. A dip is not a
+ * switch. The count clears once the bag is SOL again. One pass, not a second flip.
  */
 export function inPoolSwitch(args: {
   pool: PoolCandidate;
@@ -516,7 +517,7 @@ export function inPoolSwitch(args: {
   binsUp: number;
   boardDown: boolean;
 }): InPoolSwitch | null {
-  if (!args.filled || args.pose === "ask" || (args.switches ?? 0) >= 1) return null;
+  if (!args.filled || (args.switches ?? 0) >= MAX_BID_SLIDES) return null;
   if (!(args.binsUp >= 2 - 1e-6)) return null;
   if (args.boardDown || !chopConfirmed(args.pool)) return null;
   const frac = args.fillFraction == null ? 1 : Math.min(1, Math.max(0, args.fillFraction));
@@ -619,6 +620,31 @@ export function planFleet(args: {
         closes.push({ id: seat.id, action: "exit", reason: "ask left behind" });
         continue;
       }
+      // The ask is under the price again. Climb while the next buy still clears.
+      // After a few climbs the seat stops chasing.
+      if (fromAsk >= 2 - 1e-6) {
+        const kind = inPoolSwitch({
+          pool,
+          solDeployed: seat.solDeployed,
+          fillFraction: seat.fillFraction,
+          filled: true,
+          pose: seat.pose,
+          switches: seat.switches,
+          binsUp: fromAsk,
+          boardDown: args.boardDown === true,
+        });
+        if (kind) {
+          switches.push({
+            id: seat.id,
+            reason: kind === "ask" ? "switch the fill into the active ask" : "lift the SOL bid into the active bin",
+          });
+          continue;
+        }
+        if ((seat.switches ?? 0) >= MAX_BID_SLIDES) {
+          closes.push({ id: seat.id, action: "exit", reason: "ask left behind" });
+          continue;
+        }
+      }
       holds.push({ id: seat.id, reason: "ask waits for the buy" });
       continue;
     }
@@ -684,25 +710,35 @@ export function planFleet(args: {
         continue;
       }
     }
-    // Still SOL, off the bin. Two bins is a runner. One bin above stays when
-    // the next minute of selling already reaches it, and steps up when the
-    // bin is too deep for that and the share still clears the two transactions.
-    // One bin below does not step down: that pays two transactions to enter a dump.
+    // Still SOL, off the bin. One bin above stays when the next minute of
+    // selling already reaches it, and steps onto the active bin when the share
+    // clears the two transactions. Two bins costs the same hop when that share
+    // clears. Farther is a runner. One bin below does not step down.
     if (oneBinSkim && seat.filled !== true) {
-      const binsAway = Math.abs(binsAboveEntry(price, seat.entryPrice, binStep));
+      const binsUp = binsAboveEntry(price, seat.entryPrice, binStep);
+      const binsAway = Math.abs(binsUp);
       const slidesUsed = seat.slides ?? 0;
       if (binsAway >= 1 - 1e-6) {
         const solPx = pool.solPrice || seat.solPrice || 0;
-        if (binsAway >= 2 - 1e-6 || slidesUsed >= MAX_BID_SLIDES || !chopStillPays(pool)) {
+        const tired = slidesUsed >= MAX_BID_SLIDES || !chopStillPays(pool);
+        if (binsUp <= -2 + 1e-6 || tired) {
           closes.push({ id: seat.id, action: "exit", reason: "bid left behind" });
           continue;
         }
-        if (
-          binsAboveEntry(price, seat.entryPrice, binStep) >= 1 - 1e-6 &&
+        if (binsUp < -1e-6) {
+          holds.push({ id: seat.id, reason: "waiting for the bin" });
+          continue;
+        }
+        const hop =
+          binsUp < MAX_SOL_HOP_BINS + 1 - 1e-6 &&
           chopConfirmed(pool) &&
-          offBinSlidePays(pool, seat.solDeployed * solPx, config.txCostUsd, config.minEdgeUsd)
-        ) {
+          offBinSlidePays(pool, seat.solDeployed * solPx, config.txCostUsd, config.minEdgeUsd);
+        if (hop) {
           slides.push({ id: seat.id, reason: "slide the SOL bid into the active bin" });
+          continue;
+        }
+        if (binsUp >= 2 - 1e-6) {
+          closes.push({ id: seat.id, action: "exit", reason: "bid left behind" });
           continue;
         }
         holds.push({ id: seat.id, reason: "waiting for the bin" });
