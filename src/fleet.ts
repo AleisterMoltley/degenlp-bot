@@ -38,6 +38,12 @@ export interface FleetPreview {
   opportunityScore: number;
   edgeUsd: number;
   fee30m: number;
+  /** Collected 30-minute fees divided by pool TVL. */
+  feeToTvl: number;
+  binStep: number;
+  baseFeePct: number;
+  /** Minutes since the pool was created. 0 when the feed has no age. */
+  ageMin: number;
   metThreshold: boolean;
   watched?: boolean;
 }
@@ -158,29 +164,63 @@ function skimQuote(
   return { pool: copy, metrics };
 }
 
+function feeToTvl(pool: PoolCandidate): number {
+  return pool.fee30mUsd / Math.max(pool.pairLiquidityUsd, 1);
+}
+
+/** One DLMM per coin. The hotter fee/TVL sibling stays, and a watched flag survives. */
+function onePoolPerMint(pools: PoolCandidate[]): PoolCandidate[] {
+  const best = new Map<string, PoolCandidate>();
+  for (const pool of pools) {
+    const key = pool.tokenMint || pool.poolAddress;
+    const have = best.get(key);
+    if (!have || feeToTvl(pool) > feeToTvl(have)) {
+      best.set(key, pool.watched || have?.watched ? { ...pool, watched: true } : pool);
+    } else if (pool.watched && !have.watched) {
+      best.set(key, { ...have, watched: true });
+    }
+  }
+  return [...best.values()];
+}
+
 function pickSkims(
   pools: PoolCandidate[],
   budget: number,
   blocked: Set<string>,
   moves: Record<string, number> | undefined,
   seatCap: number,
+  seatedMints: Set<string>,
 ): FleetOpen[] {
-  const free = pools.filter(
+  // Quote every sibling. Fee/TVL picks the row on the gate. It must not drop
+  // a thinner pool of the same coin that is the one the cost quote accepts.
+  const ranked = pools.filter(
     (pool) =>
       pool.venue === "dlmm" &&
       !blocked.has(pool.poolAddress) &&
+      !seatedMints.has(pool.tokenMint) &&
       !tapeBlocksEntry(pool, moves) &&
       !entryBlocked(pool),
   );
-  if (budget < config.fleetMinSlot || seatCap < config.fleetMinSlot || !free.length) return [];
+  if (budget < config.fleetMinSlot || seatCap < config.fleetMinSlot || !ranked.length) return [];
   const maxSeats = Math.max(1, Math.floor(config.fleetSlots));
   for (let n = maxSeats; n >= 1; n -= 1) {
     const slot = Math.min(floorSol(budget / n), seatCap);
     if (slot < config.fleetMinSlot) continue;
-    const pass = free
-      .map((pool) => skimQuote(pool, slot, moves))
-      .filter((row) => row.metrics.metThreshold && row.metrics.edgeUsd > 0)
-      .sort((a, b) => feePerBin(b.pool) - feePerBin(a.pool) || b.metrics.edgeUsd - a.metrics.edgeUsd);
+    const byMint = new Map<string, { pool: PoolCandidate; metrics: Metrics }>();
+    for (const pool of ranked) {
+      const quoted = skimQuote(pool, slot, moves);
+      if (!quoted.metrics.metThreshold || quoted.metrics.edgeUsd <= 0) continue;
+      const key = pool.tokenMint || pool.poolAddress;
+      const have = byMint.get(key);
+      const better =
+        !have ||
+        feePerBin(quoted.pool) > feePerBin(have.pool) ||
+        (feePerBin(quoted.pool) === feePerBin(have.pool) && quoted.metrics.edgeUsd > have.metrics.edgeUsd);
+      if (better) byMint.set(key, quoted);
+    }
+    const pass = [...byMint.values()].sort(
+      (a, b) => feePerBin(b.pool) - feePerBin(a.pool) || b.metrics.edgeUsd - a.metrics.edgeUsd,
+    );
     if (pass.length < n) continue;
     return pass.slice(0, n).map((row) => ({
       pool: row.pool,
@@ -407,15 +447,29 @@ export function planFleet(args: {
     }
   }
 
+  const seatedMints = new Set(kept.map((seat) => seat.tokenMint).filter(Boolean));
+  for (const open of opens) {
+    if (open.pool.tokenMint) seatedMints.add(open.pool.tokenMint);
+  }
   const skims = quiet
     ? []
-    : pickSkims(args.pools, free, blocked, args.moves, seatCap).filter((row) => allow(row.pool));
+    : pickSkims(args.pools, free, blocked, args.moves, seatCap, seatedMints).filter((row) => allow(row.pool));
   opens.push(...skims);
   if (args.freezeOpens) opens.length = 0;
 
-  const previewSlot = skims[0]?.solDeploy ?? (free >= config.fleetMinSlot ? free : config.fleetMinSlot);
-  const preview: FleetPreview[] = args.pools
-    .filter((pool) => pool.venue === "dlmm")
+  const previewSlot =
+    skims[0]?.solDeploy ?? (free >= config.fleetMinSlot ? Math.min(seatCap, free) : seatCap);
+  const previewPools = onePoolPerMint(args.pools.filter((pool) => pool.venue === "dlmm"));
+  const previewSeen = new Set(previewPools.map((pool) => pool.poolAddress));
+  for (const open of opens) {
+    if (open.pool.venue !== "dlmm" || previewSeen.has(open.pool.poolAddress)) continue;
+    const key = open.pool.tokenMint || open.pool.poolAddress;
+    const idx = previewPools.findIndex((pool) => (pool.tokenMint || pool.poolAddress) === key);
+    if (idx >= 0) previewPools[idx] = open.pool;
+    else previewPools.push(open.pool);
+    previewSeen.add(open.pool.poolAddress);
+  }
+  const preview: FleetPreview[] = previewPools
     .map((pool) => {
       const quoted = skimQuote(pool, previewSlot, args.moves);
       const blockedByTape = tapeBlocksEntry(pool, args.moves);
@@ -442,11 +496,14 @@ export function planFleet(args: {
         opportunityScore: quoted.metrics.opportunityScore,
         edgeUsd: quoted.metrics.edgeUsd,
         fee30m: pool.fee30mUsd,
+        feeToTvl: feeToTvl(pool),
+        binStep: pool.binStep ?? 0,
+        baseFeePct: pool.baseFeePct ?? 0,
+        ageMin: pool.createdAtMs > 0 ? Math.max(0, Math.round((args.now - pool.createdAtMs) / 60_000)) : 0,
         metThreshold: quoted.metrics.metThreshold && !blockedByGate && !quiet,
         watched: pool.watched === true,
       };
-    })
-    .sort((a, b) => b.edgeUsd - a.edgeUsd);
+    });
 
   for (const open of opens) {
     const row = preview.find((item) => item.poolAddress === open.pool.poolAddress);
@@ -457,14 +514,15 @@ export function planFleet(args: {
     row.metThreshold = true;
     row.opportunityScore = open.metrics.opportunityScore;
   }
-  preview.sort((a, b) => b.edgeUsd - a.edgeUsd);
-  const watchedRows = preview.filter((row) => row.watched).sort((a, b) => b.edgeUsd - a.edgeUsd);
+  preview.sort((a, b) => b.feeToTvl - a.feeToTvl || b.fee30m - a.fee30m);
+  const watchedRows = preview.filter((row) => row.watched).sort((a, b) => b.feeToTvl - a.feeToTvl || b.fee30m - a.fee30m);
   const rest = preview.filter((row) => !row.watched);
   const cap = Math.max(8, Math.min(24, watchedRows.length || 8));
   preview.splice(0, preview.length, ...[...watchedRows, ...rest].slice(0, cap));
 
   const names = opens.map((row) => `${row.strategy} ${row.pool.tokenSymbol} ${row.solDeploy.toFixed(3)}`).join(", ");
-  const falling = args.pools.some((pool) => pool.venue === "dlmm" && tapeBlocksEntry(pool, args.moves));
+  const best = preview[0];
+  const bestText = `${best?.poolName ?? "none"} $${(best?.edgeUsd ?? 0).toFixed(3)}`;
   let summary = "no pool clears costs";
   if (args.freezeOpens && !closes.length) {
     summary = "shock pause; no new seats";
@@ -473,17 +531,17 @@ export function planFleet(args: {
   } else if (args.seats.length) {
     summary = `holding ${args.seats.length}`;
   } else if (args.boardDown) {
-    summary = `board falling; best ${preview[0]?.poolName ?? "none"} $${(preview[0]?.edgeUsd ?? 0).toFixed(3)}`;
-  } else if (falling) {
-    summary = `tape falling; best ${preview[0]?.poolName ?? "none"} $${(preview[0]?.edgeUsd ?? 0).toFixed(3)}`;
-  } else if (preview.some((row) => row.strategy === "geometry")) {
-    summary = `fee rate too thin; best ${preview[0]?.poolName ?? "none"} $${(preview[0]?.edgeUsd ?? 0).toFixed(3)}`;
-  } else if (preview.some((row) => row.strategy === "travel")) {
-    summary = `no travel; best ${preview[0]?.poolName ?? "none"} $${(preview[0]?.edgeUsd ?? 0).toFixed(3)}`;
-  } else if (preview.some((row) => row.strategy === "chop")) {
-    summary = `no chop; best ${preview[0]?.poolName ?? "none"} $${(preview[0]?.edgeUsd ?? 0).toFixed(3)}`;
-  } else if (preview[0]) {
-    summary = `no pool clears costs; best ${preview[0].poolName} $${preview[0].edgeUsd.toFixed(3)}`;
+    summary = `board falling; best ${bestText}`;
+  } else if (best?.strategy === "tape") {
+    summary = `tape falling; best ${bestText}`;
+  } else if (best?.strategy === "geometry") {
+    summary = `fee rate too thin; best ${bestText}`;
+  } else if (best?.strategy === "travel") {
+    summary = `no travel; best ${bestText}`;
+  } else if (best?.strategy === "chop") {
+    summary = `no chop; best ${bestText}`;
+  } else if (best) {
+    summary = `no pool clears costs; best ${bestText}`;
   }
 
   return { closes, opens, holds, preview, summary };

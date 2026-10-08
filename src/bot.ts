@@ -28,6 +28,10 @@ export interface ScanRecord {
     opportunityScore: number;
     edgeUsd: number;
     fee30m: number;
+    feeToTvl: number;
+    binStep: number;
+    baseFeePct: number;
+    ageMin: number;
     metThreshold: boolean;
     strategy: string;
   }>;
@@ -205,6 +209,10 @@ export class DegenLpBot {
       opportunityScore: row.opportunityScore,
       edgeUsd: row.edgeUsd,
       fee30m: row.fee30m,
+      feeToTvl: row.feeToTvl,
+      binStep: row.binStep,
+      baseFeePct: row.baseFeePct,
+      ageMin: row.ageMin,
       metThreshold: row.metThreshold,
       strategy: row.strategy,
     }));

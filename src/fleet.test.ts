@@ -114,7 +114,7 @@ test("a touch budget stays under the strict 4% fill", () => {
 test("several skim seats open when each quote clears, and a red pool stays out", () => {
   const quiet = pool({ poolAddress: "quiet", poolName: "QUIET-SOL", tokenSymbol: "QUIET", fee30mUsd: 40, fee1hUsd: 80 });
   const a = paying();
-  const b = paying({ poolAddress: "pool-b", poolName: "NEXT-SOL", tokenSymbol: "NEXT" });
+  const b = paying({ poolAddress: "pool-b", poolName: "NEXT-SOL", tokenSymbol: "NEXT", tokenMint: "mint-b" });
   const plan = planFleet({ pools: [quiet, a, b], seats: [], deploySol: 0.72, now, dlmmOnly: true });
   const again = planFleet({ pools: [quiet, a, b], seats: [], deploySol: 0.72, now, dlmmOnly: true });
   const sol = plan.opens.reduce((sum, row) => sum + row.solDeploy, 0);
@@ -307,6 +307,7 @@ test("a bin that jumps is not a seat", () => {
 test("a flat fee rate outranks a larger traveling print", () => {
   const traveler = paying({
     poolAddress: "travel",
+    tokenMint: "travel",
     poolName: "TRAVEL-SOL",
     tokenSymbol: "TRAVEL",
     fee30mUsd: 80_000,
@@ -316,6 +317,7 @@ test("a flat fee rate outranks a larger traveling print", () => {
   });
   const flat = paying({
     poolAddress: "flat",
+    tokenMint: "flat",
     poolName: "FLAT-SOL",
     tokenSymbol: "FLAT",
     baseFeePct: 0.12,
@@ -505,6 +507,82 @@ test("a shock pause opens nothing and still scratches a fill", () => {
   assert.equal(scratch.opens.length, 0);
   assert.equal(scratch.closes.length, 1);
   assert.match(scratch.closes[0].reason, /scratched the fill/);
+});
+
+test("the gate ranks collected fee/TVL and keeps one pool per coin", () => {
+  const hot = pool({
+    poolAddress: "hot",
+    tokenMint: "hot",
+    tokenSymbol: "HOT",
+    poolName: "HOT-SOL",
+    pairLiquidityUsd: 20_000,
+    tokenLiquidityUsd: 20_000,
+    fee30mUsd: 4_000,
+    fee1hUsd: 8_000,
+    baseFeePct: 0.02,
+  });
+  const twin = pool({
+    poolAddress: "hot-b",
+    tokenMint: "hot",
+    tokenSymbol: "HOT",
+    poolName: "HOT-B",
+    pairLiquidityUsd: 40_000,
+    tokenLiquidityUsd: 40_000,
+    fee30mUsd: 1_000,
+    fee1hUsd: 2_000,
+    baseFeePct: 0.02,
+  });
+  const cold = pool({
+    poolAddress: "cold",
+    tokenMint: "cold",
+    tokenSymbol: "COLD",
+    poolName: "COLD-SOL",
+    pairLiquidityUsd: 20_000,
+    tokenLiquidityUsd: 20_000,
+    fee30mUsd: 400,
+    fee1hUsd: 800,
+    baseFeePct: 0.02,
+    binStep: 4,
+  });
+  const plan = planFleet({ pools: [cold, twin, hot], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.equal(plan.preview.filter((row) => row.tokenSymbol === "HOT").length, 1);
+  assert.equal(plan.preview[0]?.poolAddress, "hot");
+  assert.ok((plan.preview[0]?.feeToTvl ?? 0) > (plan.preview[1]?.feeToTvl ?? 0));
+  assert.equal(plan.preview[0]?.binStep, 200);
+  assert.equal(plan.preview[0]?.baseFeePct, 0.02);
+  assert.ok((plan.preview[0]?.ageMin ?? 0) > 60);
+  assert.equal(plan.opens.length, 0);
+});
+
+test("one coin opens once, on the sibling the cost quote accepts", () => {
+  const noisy = paying({
+    poolAddress: "noisy",
+    tokenMint: "same",
+    tokenSymbol: "SAME",
+    poolName: "NOISY-SOL",
+    fee30mUsd: 14_000,
+    fee1hUsd: 40_000,
+    binStep: 200,
+    binTapeNet: 1,
+    baseFeePct: 0.06,
+  });
+  const quiet = paying({
+    poolAddress: "quiet-same",
+    tokenMint: "same",
+    tokenSymbol: "SAME",
+    poolName: "QUIET-SAME",
+    fee30mUsd: 12_000,
+    fee1hUsd: 24_000,
+    binStep: 100,
+    binTapeNet: 0.2,
+    baseFeePct: 0.12,
+  });
+  const plan = planFleet({ pools: [noisy, quiet], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.equal(plan.opens.length, 1, plan.summary);
+  assert.equal(plan.opens[0]?.pool.poolAddress, "quiet-same");
+  assert.equal(plan.preview.filter((row) => row.tokenSymbol === "SAME").length, 1);
+  assert.equal(plan.preview.find((row) => row.tokenSymbol === "SAME")?.poolAddress, "quiet-same");
+  assert.equal(plan.preview.find((row) => row.tokenSymbol === "SAME")?.metThreshold, true);
 });
 
 test("a realized drop raises the touch budget inside the 4% cap", () => {

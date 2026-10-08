@@ -404,10 +404,14 @@ function dashboardHtml(): string {
 
       var hist = (s.scanHistory && s.scanHistory[0] && s.scanHistory[0].topCandidates) || [];
       document.getElementById('candidates').innerHTML = hist.length ? (
-        '<table><thead><tr><th>Pool</th><th>Strategy</th><th>Edge</th><th>Fee 30m</th><th>Gate</th></tr></thead><tbody>' +
+        '<table><thead><tr><th>Pool</th><th>Strategy</th><th>Edge</th><th>Fee/TVL</th><th>Bin</th><th>Gate</th></tr></thead><tbody>' +
         hist.map(function (c) {
-          return '<tr><td>' + esc(c.poolName) + '</td><td>' + esc(c.strategy || c.side || '') +
-            '</td><td>' + signed(c.edgeUsd, 3) + '</td><td>$' + fmt(c.fee30m, 0) +
+          var ratio = c.feeToTvl > 0 ? (c.feeToTvl * 100).toFixed(2) + '%' : '—';
+          var bin = c.binStep ? c.binStep + ' · ' + ((c.baseFeePct || 0) * 100).toFixed(2) + '%' : '—';
+          var age = c.ageMin > 0 ? '<div class="mono" style="color:var(--muted)">' + c.ageMin + 'm</div>' : '';
+          return '<tr><td>' + esc(c.poolName) + age + '</td><td>' + esc(c.strategy || c.side || '') +
+            '</td><td>' + signed(c.edgeUsd, 3) + '</td><td>' + ratio +
+            '<div class="mono" style="color:var(--muted)">$' + fmt(c.fee30m, 0) + '</div></td><td class="mono">' + bin +
             '</td><td>' + (c.metThreshold ? badge('PASS', 'ok') : badge('SKIP', 'warn')) + '</td></tr>';
         }).join('') + '</tbody></table>'
       ) : '<span style="color:var(--muted)">Waiting for the first scan.</span>';

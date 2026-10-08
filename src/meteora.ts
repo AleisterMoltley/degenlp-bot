@@ -27,9 +27,21 @@ const MAJOR_SYMBOLS = new Set([
   "MET",
   "WBTC",
   "WETH",
+  "ETH",
+  "ZEC",
+  "HYPE",
+  "WNEAR",
+  "NEAR",
+  "PUMP",
+  "BTC",
   "CBBTC",
   "TBTC",
 ]);
+
+/** Quote assets and large caps. Memecoins are not in this set. */
+export function isMajorSymbol(symbol: string): boolean {
+  return MAJOR_SYMBOLS.has(symbol.trim().toUpperCase());
+}
 
 interface ApiToken {
   address: string;
@@ -109,7 +121,7 @@ function fromApiPool(pool: ApiPool, venue: PoolVenue): PoolCandidate | null {
   const meme = solOnY ? x : y;
   const sol = solOnY ? y : x;
   const symbol = (meme.symbol || "").toUpperCase();
-  if (!symbol || MAJOR_SYMBOLS.has(symbol)) return null;
+  if (!symbol || isMajorSymbol(symbol)) return null;
   const freezeDisabled = meme.freeze_authority_disabled !== false;
   if (!freezeDisabled) return null;
 
@@ -172,7 +184,7 @@ function fromDammV1(pool: DammV1Pool): PoolCandidate | null {
   const name = pool.pool_name || "";
   const parts = name.split("-");
   const memeSymbol = (parts[memeIdx] || parts[0] || "MEME").toUpperCase();
-  if (MAJOR_SYMBOLS.has(memeSymbol)) return null;
+  if (isMajorSymbol(memeSymbol)) return null;
 
   const tvl = Number(pool.pool_tvl ?? 0);
   const usd = Number(pool.pool_token_usd_amounts?.[memeIdx] ?? 0);
