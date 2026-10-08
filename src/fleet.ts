@@ -2,7 +2,7 @@ import { chopShapeOk, depthOk } from "./chop.js";
 import { config } from "./config.js";
 import { bankableUsd, trailGaveBack } from "./edge.js";
 import { halfWidthFromBins, markIlUsd } from "./pnl.js";
-import { dipThrough } from "./fillwatch.js";
+import { bidLeftBehind, dipThrough } from "./fillwatch.js";
 import { feePerBin, feeRateClears, microChopOk } from "./travel.js";
 import { computeMetrics, planPosition, rankPools, type Metrics } from "./scorer.js";
 import type { ActivePosition, BotDecision, PoolCandidate } from "./types.js";
@@ -248,6 +248,30 @@ function seatIl(seat: ActivePosition, pool: PoolCandidate | undefined, price: nu
   });
 }
 
+/** A mature tape that stopped reversing is a dead chop. A short tape is not. */
+function chopStillPays(pool: PoolCandidate): boolean {
+  const priceReady = (pool.chopSamples ?? 0) >= 4;
+  const priceOk =
+    !priceReady ||
+    chopShapeOk({
+      samples: pool.chopSamples ?? 0,
+      crossings: pool.chopCrossings ?? 0,
+      netBins: pool.chopNetBins ?? 0,
+    });
+  const binReady = (pool.binTapeSamples ?? 0) >= 8 && (pool.binTapeSpanMs ?? 0) >= 45_000;
+  const binOk =
+    !binReady ||
+    microChopOk({
+      samples: pool.binTapeSamples ?? 0,
+      spanMs: pool.binTapeSpanMs ?? 0,
+      crossings: pool.binTapeCrossings ?? 0,
+      netBins: pool.binTapeNet ?? 0,
+      maxStep: pool.binTapeMaxStep ?? 0,
+    });
+  if (!priceReady && !binReady) return true;
+  return priceOk && binOk;
+}
+
 export function planFleet(args: {
   pools: PoolCandidate[];
   seats: ActivePosition[];
@@ -281,14 +305,24 @@ export function planFleet(args: {
     const drop = dropOf(pool, args.moves);
     const fast = drop >= Math.max(step, 0.01);
     const oneBinSkim = isSkim(seat) && seat.minBinId === seat.maxBinId && seat.entryPrice > 0;
-    // The fee arrives on the way into the bin and again on the way out. Selling
-    // the meme on the way in pays the dump. A break past the bid still leaves.
-    if (oneBinSkim && dipThrough(price, seat.entryPrice, seat.binStep || pool.binStep || 80)) {
+    // Each time the bin trades through the bid, the position earns the fee and
+    // is SOL again. Closing there pays two transactions and misses the next
+    // cross. A break past the bid, a run away upward, or a dead chop still leaves.
+    const binStep = seat.binStep || pool.binStep || 80;
+    if (oneBinSkim && dipThrough(price, seat.entryPrice, binStep)) {
       closes.push({ id: seat.id, action: "exit", reason: "scratched the fill" });
       continue;
     }
+    if (oneBinSkim && bidLeftBehind(price, seat.entryPrice, binStep)) {
+      closes.push({ id: seat.id, action: "exit", reason: "bid left behind" });
+      continue;
+    }
     if (oneBinSkim && seat.touched && !seat.filled && price >= seat.entryPrice) {
-      closes.push({ id: seat.id, action: "exit", reason: "round trip back to SOL" });
+      if (!chopStillPays(pool)) {
+        closes.push({ id: seat.id, action: "exit", reason: "chop ended" });
+        continue;
+      }
+      holds.push({ id: seat.id, reason: "bid is SOL again" });
       continue;
     }
     if (oneBinSkim && price < seat.entryPrice) {

@@ -4,6 +4,7 @@ import {
   activeIdFromPool,
   activeIdsFromAccounts,
   bidCycle,
+  bidLeftBehind,
   bidTouched,
   dipThrough,
   LBPAIR_ACTIVE_ID_OFFSET,
@@ -37,14 +38,18 @@ test("a batched read keeps only real pair accounts", () => {
   assert.equal(ids.has("d"), false);
 });
 
-test("a round trip holds the bin, banks above it, and scratches through it", () => {
+test("a round trip holds the bin, rests one bin above, and scratches through it", () => {
   assert.equal(bidCycle(-123, -124, -124, false), "wait");
   assert.equal(bidCycle(-124, -124, -124, false), "hold");
-  assert.equal(bidCycle(-123, -124, -124, true), "bank");
+  assert.equal(bidCycle(-123, -124, -124, true), "rest");
+  assert.equal(bidCycle(-122, -124, -124, true), "leave");
+  assert.equal(bidCycle(-122, -124, -124, false), "leave");
   assert.equal(bidCycle(-125, -124, -124, true), "scratch");
   assert.equal(bidCycle(-125, -124, -124, false), "scratch");
   assert.equal(dipThrough(0.992, 1, 100), false);
   assert.equal(dipThrough(0.98, 1, 100), true);
+  assert.equal(bidLeftBehind(1.01, 1, 100), false);
+  assert.equal(bidLeftBehind(1.02, 1, 100), true);
 });
 
 test("a bid is touched only once price steps onto its bin", () => {

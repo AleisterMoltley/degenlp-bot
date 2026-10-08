@@ -35,13 +35,14 @@ export function bidTouched(activeId: number, maxBinId: number): boolean {
   return Number.isInteger(activeId) && Number.isInteger(maxBinId) && activeId <= maxBinId;
 }
 
-export type BidCycle = "wait" | "hold" | "bank" | "scratch";
+export type BidCycle = "wait" | "hold" | "rest" | "leave" | "scratch";
 
 /**
  * One-bin SOL bid.
  * Above the bin, still untouched: wait.
- * On the bin: hold. The pool's reverse swap is the exit.
- * Back above after a fill: bank. The position is SOL again.
+ * On the bin: hold. The pool's reverse swap turns the meme back into SOL.
+ * One bin above after a fill: rest. The bid is SOL again and can fill again.
+ * Two or more bins above: leave. The bid is no longer the next sell.
  * Below the bin: scratch. The reverse swap did not come.
  */
 export function bidCycle(
@@ -54,7 +55,8 @@ export function bidCycle(
     return "wait";
   }
   if (activeId < minBinId) return "scratch";
-  if (activeId > maxBinId) return seenFill ? "bank" : "wait";
+  if (activeId > maxBinId + 1) return "leave";
+  if (activeId > maxBinId) return seenFill ? "rest" : "wait";
   return "hold";
 }
 
@@ -63,4 +65,11 @@ export function dipThrough(price: number, entry: number, binStep: number): boole
   if (!(price > 0) || !(entry > 0)) return false;
   const step = Math.max(binStep, 1) / 10_000;
   return price <= entry * (1 - step * 1.5);
+}
+
+/** The price ran more than one bin above the entry, so this bid is no longer the next sell. */
+export function bidLeftBehind(price: number, entry: number, binStep: number): boolean {
+  if (!(price > 0) || !(entry > 0)) return false;
+  const step = Math.max(binStep, 1) / 10_000;
+  return price >= entry * (1 + step * 1.5);
 }

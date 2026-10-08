@@ -456,7 +456,7 @@ test("a falling board opens nothing and still scratches a fill", () => {
   assert.match(scratch.closes[0].reason, /scratched the fill/);
 });
 
-test("a fill inside the bid waits, and the way back to SOL banks", () => {
+test("a fill inside the bid waits, and the way back to SOL stays", () => {
   const inside = planFleet({
     pools: [pool({ priceUsd: 0.992 })],
     seats: [
@@ -490,8 +490,44 @@ test("a fill inside the bid waits, and the way back to SOL banks", () => {
     deploySol: 0.72,
     now,
   });
-  assert.equal(back.closes.length, 1);
-  assert.equal(back.closes[0].reason, "round trip back to SOL");
+  assert.equal(back.closes.length, 0, back.closes.map((row) => row.reason).join(","));
+  assert.match(back.holds[0]?.reason ?? "", /SOL again/);
+
+  const ran = planFleet({
+    pools: [pool({ priceUsd: 1.02 })],
+    seats: [
+      seat({
+        filled: false,
+        touched: true,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.02,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(ran.closes.length, 1);
+  assert.equal(ran.closes[0].reason, "bid left behind");
+
+  const dead = planFleet({
+    pools: [pool({ priceUsd: 1, chopSamples: 8, chopCrossings: 0, chopNetBins: 6 })],
+    seats: [
+      seat({
+        filled: false,
+        touched: true,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(dead.closes.length, 1);
+  assert.equal(dead.closes[0].reason, "chop ended");
 });
 
 test("a watched meme stays on the scanner and does not skip the gate", () => {

@@ -837,7 +837,13 @@ export class DegenLpBot {
         console.log(`[fill] ${seat.poolName} holding bin ${seat.maxBinId} active ${activeId}`);
         continue;
       }
-      const reason = cycle === "bank" ? "round trip back to SOL" : "scratched the fill";
+      if (cycle === "rest") {
+        seat.touched = true;
+        seat.filled = false;
+        console.log(`[fill] ${seat.poolName} bid is SOL again bin ${seat.maxBinId} active ${activeId}`);
+        continue;
+      }
+      const reason = cycle === "leave" ? "bid left behind" : "scratched the fill";
       console.log(`[fill] ${seat.poolName} ${reason} bin ${seat.maxBinId} active ${activeId}`);
       await this.closeSeat(seat, reason, "exit");
     }

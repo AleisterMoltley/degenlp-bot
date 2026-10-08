@@ -46,6 +46,12 @@ export function collectedFeePct(pool: { baseFeePct?: number; fee30mUsd: number; 
   return Math.min(posted, pool.fee30mUsd / pool.volume30mUsd);
 }
 
+/**
+ * Standard DLMM pools pay the LP 90% of the trading fee. Launch pools pay 80%.
+ * The pool list does not say which, so the fill quote keeps the standard 90%.
+ */
+const LP_FEE_KEEP = 0.9;
+
 /** Expected dollars left after the round trip and a small adverse move. */
 export function quoteEdge(pool: PoolCandidate, input: EdgeInput): EdgeQuote {
   const deployUsd = input.deploySol * (pool.solPrice || 0);
@@ -74,7 +80,7 @@ export function quoteEdge(pool: PoolCandidate, input: EdgeInput): EdgeQuote {
     let feePct = collectedFeePct(pool);
     if (prior30 > 0 && pool.fee30mUsd < prior30 * 0.75) feePct *= 0.45;
     const filled = Math.min(1, pool.volume30mUsd / deployUsd);
-    expectedFeesUsd = feePct * deployUsd * filled;
+    expectedFeesUsd = feePct * deployUsd * filled * LP_FEE_KEEP;
   }
   const roundTripUsd =
     entryCostUsd({
