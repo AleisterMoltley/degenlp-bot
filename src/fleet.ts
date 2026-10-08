@@ -2,7 +2,7 @@ import { chopShapeOk, depthOk } from "./chop.js";
 import { config } from "./config.js";
 import { bankableUsd, collectedFeePct, trailGaveBack } from "./edge.js";
 import { halfWidthFromBins, markIlUsd, oneBinBidIl } from "./pnl.js";
-import { bidLeftBehind, binsAboveEntry, filledShouldSell, MAX_BID_SLIDES, slideInstead } from "./fillwatch.js";
+import { bidLeftBehind, binsAboveEntry, filledShouldSell, MAX_BID_SLIDES } from "./fillwatch.js";
 import { feePerBin, feeRateClears, microChopOk } from "./travel.js";
 import { computeMetrics, planPosition, rankPools, type Metrics } from "./scorer.js";
 import type { ActivePosition, BotDecision, PoolCandidate } from "./types.js";
@@ -438,6 +438,38 @@ export function chopConfirmed(pool: PoolCandidate): boolean {
   return chopStillPays(pool);
 }
 
+/**
+ * Still SOL, one bin off the active bin.
+ * A sell pays the bin it consumes. The active bin takes the sell first, and
+ * only the leftover walks into the resting bid. The printed minute is both
+ * sides; a buy does not pay a SOL bid, so the sell is half of it.
+ * Sliding spends two transactions to take a share of that sell. It is worth
+ * it only when that share beats the leftover by those two transactions and
+ * the edge floor. The figure is one pass through the bin, not a second flip.
+ */
+export function offBinSlidePays(
+  pool: PoolCandidate,
+  deployUsd: number,
+  txCostUsd: number,
+  minEdgeUsd: number,
+): boolean {
+  const bin = pool.binSolUsd;
+  if (!(bin != null && bin > 0) || !(pool.volume30mUsd > 0) || !(deployUsd > 0)) return false;
+  if (!(txCostUsd > 0)) return false;
+  let feePct = collectedFeePct(pool);
+  const hour = pool.fee1hUsd > 0 ? pool.fee1hUsd : pool.fee30mUsd * 2;
+  const prior30 = Math.max(0, hour - pool.fee30mUsd);
+  if (prior30 > 0 && pool.fee30mUsd < prior30 * 0.75) feePct *= 0.45;
+  const keep = Math.min(0.1, Math.max(0, feePct)) * 0.9;
+  if (!(keep > 0)) return false;
+  const sell = pool.volume30mUsd / 30 / 2;
+  const walk = Math.max(0, sell - bin);
+  const stayFee = keep * Math.min(deployUsd, walk);
+  const share = deployUsd / (bin + deployUsd);
+  const slideFee = keep * Math.min(deployUsd, sell * share);
+  return slideFee - txCostUsd * 2 >= stayFee + Math.max(0, minEdgeUsd);
+}
+
 export function planFleet(args: {
   pools: PoolCandidate[];
   seats: ActivePosition[];
@@ -472,10 +504,10 @@ export function planFleet(args: {
     const drop = dropOf(pool, args.moves);
     const fast = drop >= Math.max(step, 0.01);
     const oneBinSkim = isSkim(seat) && seat.minBinId === seat.maxBinId && seat.entryPrice > 0;
-    // Fees are paid in the active bin. The seat stays there while it is SOL.
-    // A one-bin step up slides back into the new active bin. A runner, a dead
-    // chop, or a break through the bid still leaves. Closing on the first
-    // return to SOL would miss the next sell.
+    // Fees are paid by the bin a swap consumes. A SOL bid earns when a sell
+    // walks into it. One bin away, that walk is the leftover after the active
+    // bin. Two bins, a dead chop, or a third chase leaves. Closing on the
+    // first return to SOL would miss the next sell.
     const binStep = seat.binStep || pool.binStep || 80;
     // A fill is sold on the way down only once the drop beats the unwind.
     // Inside that band the market sell locks slippage and skips the fee the
@@ -514,49 +546,44 @@ export function planFleet(args: {
         continue;
       }
     }
-    // Still SOL, and the price has left the bin we are in. One step lands in
-    // the active bin, which is the bin that pays. A missing tape does not slide
-    // and does not evict. A dead chop, a third slide, or a runner does.
+    // Still SOL, off the bin. Two bins is a runner. One bin stays when the
+    // next minute of selling already reaches it, and steps in when the bin is
+    // too deep for that and the share still clears the two transactions.
     if (oneBinSkim && seat.filled !== true) {
-      const binsUp = binsAboveEntry(price, seat.entryPrice, binStep);
+      const binsAway = Math.abs(binsAboveEntry(price, seat.entryPrice, binStep));
       const slidesUsed = seat.slides ?? 0;
-      if (binsUp >= 1 - 1e-6) {
-        if (slideInstead(binsUp, false, slidesUsed, chopConfirmed(pool))) {
-          slides.push({ id: seat.id, reason: "slide the bid into the active bin" });
-          continue;
-        }
-        if (binsUp > 2.5 || slidesUsed >= MAX_BID_SLIDES || !chopStillPays(pool)) {
+      if (binsAway >= 1 - 1e-6) {
+        const solPx = pool.solPrice || seat.solPrice || 0;
+        if (binsAway >= 2 - 1e-6 || slidesUsed >= MAX_BID_SLIDES || !chopStillPays(pool)) {
           closes.push({ id: seat.id, action: "exit", reason: "bid left behind" });
           continue;
         }
-        holds.push({ id: seat.id, reason: "waiting for the bin" });
-        continue;
-      }
-      // SOL sitting above the active bin earns nothing. One step down lands
-      // in the bin the next sell pays. A dead chop does not chase the dip.
-      const binsDown = -binsUp;
-      if (binsDown >= 1 - 1e-6) {
-        if (slideInstead(binsDown, false, slidesUsed, chopConfirmed(pool))) {
-          slides.push({ id: seat.id, reason: "slide the bid into the active bin" });
-          continue;
-        }
-        if (binsDown > 2.5 || slidesUsed >= MAX_BID_SLIDES || !chopStillPays(pool)) {
-          closes.push({ id: seat.id, action: "exit", reason: "bid left behind" });
+        if (
+          chopConfirmed(pool) &&
+          offBinSlidePays(pool, seat.solDeployed * solPx, config.txCostUsd, config.minEdgeUsd)
+        ) {
+          slides.push({ id: seat.id, reason: "slide the SOL bid into the active bin" });
           continue;
         }
         holds.push({ id: seat.id, reason: "waiting for the bin" });
         continue;
       }
     }
-    // Inside the fee bin and still SOL. The 8-minute clock does not evict it.
-    // Modeled drip fees are not a fill, so this does not bank. A dead chop does.
-    if (oneBinSkim && !seat.filled && price >= seat.entryPrice) {
+    // Still inside the fee bin. At or above the entry the bid is earning, and
+    // a dip smaller than one bin is the same bin: a dead chop leaves, a live
+    // chop is not thrown out by the clock, and the dip does not scale.
+    const binsAwayNow = Math.abs(binsAboveEntry(price, seat.entryPrice, binStep));
+    if (oneBinSkim && !seat.filled && (price >= seat.entryPrice || binsAwayNow < 1 - 1e-6)) {
       const priceReady = (pool.chopSamples ?? 0) >= 4;
       const binReady = (pool.binTapeSamples ?? 0) >= 8 && (pool.binTapeSpanMs ?? 0) >= 45_000;
       const since = seat.slidAt ?? seat.enteredAt;
       const tapeGone = !priceReady && !binReady && args.now - since >= 3 * 60_000;
       if (tapeGone || !chopStillPays(pool)) {
         closes.push({ id: seat.id, action: "exit", reason: "chop ended" });
+        continue;
+      }
+      if (price < seat.entryPrice) {
+        holds.push({ id: seat.id, reason: "waiting for the round trip" });
         continue;
       }
       holds.push({ id: seat.id, reason: seat.touched ? "bid is SOL again" : "earning the bin" });

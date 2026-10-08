@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { quoteEdge } from "./edge.js";
-import { downwardMove, planFleet, seatCeilingSol, SEAT_FLOOR_USD, skimFillFraction } from "./fleet.js";
+import { downwardMove, offBinSlidePays, planFleet, seatCeilingSol, SEAT_FLOOR_USD, skimFillFraction } from "./fleet.js";
 import { halfWidthFromBins } from "./pnl.js";
 import type { ActivePosition, PoolCandidate } from "./types.js";
 
@@ -173,8 +173,8 @@ test("a one-bin fill is scratched and a smaller dip is not", () => {
     deploySol: 0.72,
     now,
   });
-  assert.equal(unfilled.closes.length, 0, unfilled.closes.map((row) => row.reason).join(","));
-  assert.equal(unfilled.slides.length, 1);
+  assert.equal(unfilled.slides.length, 0);
+  assert.equal(unfilled.closes[0]?.reason, "bid left behind");
 
   const dip = planFleet({
     pools: [pool({ priceUsd: 0.995 })],
@@ -249,7 +249,8 @@ test("a SOL seat in the fee bin stays past the window, and a dip that never retu
     now,
   });
   assert.equal(follow.closes.length, 0, follow.closes.map((row) => row.reason).join(","));
-  assert.equal(follow.slides.length, 1);
+  assert.equal(follow.slides.length, 0);
+  assert.match(follow.holds[0]?.reason ?? "", /waiting for the bin/);
 
   const deadDip = planFleet({
     pools: [pool({ priceUsd: 0.99, chopCrossings: 0, chopNetBins: 6 })],
@@ -266,8 +267,9 @@ test("a SOL seat in the fee bin stays past the window, and a dip that never retu
     deploySol: 0.72,
     now,
   });
-  assert.equal(shy.closes.length, 1);
-  assert.match(shy.closes[0].reason, /skim window closed/);
+  assert.equal(shy.closes.length, 0, shy.closes.map((row) => row.reason).join(","));
+  assert.equal(shy.slides.length, 0);
+  assert.match(shy.holds[0]?.reason ?? "", /round trip/);
 
   const filledDip = planFleet({
     pools: [pool({ priceUsd: 0.99 })],
@@ -716,7 +718,8 @@ test("a fill inside the bid waits, and the way back to SOL stays", () => {
     now,
   });
   assert.equal(oneUp.closes.length, 0, oneUp.closes.map((row) => row.reason).join(","));
-  assert.equal(oneUp.slides.length, 1);
+  assert.equal(oneUp.slides.length, 0);
+  assert.match(oneUp.holds[0]?.reason ?? "", /waiting for the bin/);
 
   const filledUp = planFleet({
     pools: [pool({ priceUsd: 1.01 })],
@@ -839,9 +842,8 @@ test("a fill inside the bid waits, and the way back to SOL stays", () => {
     deploySol: 0.72,
     now,
   });
-  assert.equal(ran.closes.length, 0, ran.closes.map((row) => row.reason).join(","));
-  assert.equal(ran.slides.length, 1);
-  assert.match(ran.slides[0].reason, /slide/);
+  assert.equal(ran.slides.length, 0);
+  assert.equal(ran.closes[0]?.reason, "bid left behind");
 
   const runner = planFleet({
     pools: [pool({ priceUsd: 1.05 })],
@@ -932,6 +934,71 @@ test("a fill inside the bid waits, and the way back to SOL stays", () => {
     now,
   });
   assert.equal(blind.closes[0]?.reason, "chop ended");
+});
+
+test("a deep bin is worth one slide and a bin the sell already reaches is not", () => {
+  const deep = pool();
+  assert.equal(offBinSlidePays(deep, 12, 0.02, 0.02), false);
+  assert.equal(offBinSlidePays(deep, 50, 0.02, 0.02), true);
+  assert.equal(offBinSlidePays(pool({ binSolUsd: 200 }), 50, 0.02, 0.02), false);
+  assert.equal(offBinSlidePays(pool({ binSolUsd: undefined }), 50, 0.02, 0.02), false);
+
+  const up = planFleet({
+    pools: [pool({ priceUsd: 1.01 })],
+    seats: [
+      seat({
+        filled: false,
+        solDeployed: 0.5,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.01,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(up.closes.length, 0, up.closes.map((row) => row.reason).join(","));
+  assert.equal(up.slides.length, 1);
+  assert.match(up.slides[0].reason, /slide/);
+
+  const reached = planFleet({
+    pools: [pool({ priceUsd: 1.01, binSolUsd: 200 })],
+    seats: [
+      seat({
+        filled: false,
+        solDeployed: 0.5,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.01,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(reached.slides.length, 0);
+  assert.equal(reached.closes.length, 0, reached.closes.map((row) => row.reason).join(","));
+  assert.match(reached.holds[0]?.reason ?? "", /waiting/);
+
+  const chased = planFleet({
+    pools: [pool({ priceUsd: 1.01 })],
+    seats: [
+      seat({
+        filled: false,
+        slides: 3,
+        solDeployed: 0.5,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.01,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(chased.slides.length, 0);
+  assert.equal(chased.closes[0]?.reason, "bid left behind");
 });
 
 test("a watched meme stays on the scanner and does not skip the gate", () => {

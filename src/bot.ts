@@ -2,7 +2,7 @@ import { buildCandidates, fetchOriginalOpportunityChecks, fetchTopPumpTokens } f
 import { config } from "./config.js";
 import { bankableUsd, collectedFeePct, depthReadRank } from "./edge.js";
 import { chopFromPrices } from "./chop.js";
-import { bidCycle, filledShouldSell, MAX_BID_SLIDES, scratchNow, slideIntoActive } from "./fillwatch.js";
+import { bidCycle, filledShouldSell, MAX_BID_SLIDES, scratchNow } from "./fillwatch.js";
 import { binTapeFromIds, feeRateClears, mintShouldSleep, priceBinId } from "./travel.js";
 import { deploySolFor, equitySol, paceSol } from "./growth.js";
 import { DlmmExecutor, DUST_RAW, enterPositionDryRun } from "./executor.js";
@@ -12,7 +12,7 @@ import { mergeWatched, watchedMemePools } from "./watched.js";
 import { accrueFees, entryCostUsd, markIlUsd, oneBinBidIl, priceBand } from "./pnl.js";
 import { hydratePosition } from "./position.js";
 import { measureRpcLatency, ProofNetworkTelemetry } from "./proofnetwork.js";
-import { chopConfirmed, chopStillPays, planFleet, coolsOff, downwardMove, type FleetOpen, type FleetPlan } from "./fleet.js";
+import { chopConfirmed, chopStillPays, offBinSlidePays, planFleet, coolsOff, downwardMove, type FleetOpen, type FleetPlan } from "./fleet.js";
 import { decide, planToCheck, type Plan } from "./scorer.js";
 import { ensureGrowth, loadState, saveState, type BotState, type GrowthLedger } from "./state.js";
 import type { ActivePosition, BotDecision, OpportunityCheck, PoolCandidate } from "./types.js";
@@ -896,23 +896,18 @@ export class DegenLpBot {
         continue;
       }
       if (cycle === "chase") {
-        const pool = this.lastPools.find((row) => row.poolAddress === poolAddress);
-        const confirmed = pool ? chopConfirmed(pool) : false;
-        if (pool && slideIntoActive(activeId, seat.maxBinId, seat.filled === true, seat.slides ?? 0, confirmed)) {
-          await this.slideSeat(seat, pool);
-        }
+        // One bin above and still SOL. Step in only when the active bin would
+        // swallow the next sell. Otherwise the return through this bid is the fee.
+        await this.maybeSlideToActive(seat);
         continue;
       }
       if (cycle === "scratch" && seat.filled !== true) {
-        const pool = this.lastPools.find((row) => row.poolAddress === poolAddress);
-        const confirmed = pool ? chopConfirmed(pool) : false;
-        if (pool && slideIntoActive(activeId, seat.maxBinId, false, seat.slides ?? 0, confirmed)) {
-          await this.slideSeat(seat, pool);
-          continue;
-        }
         if (!scratchNow(activeId, seat.minBinId)) {
-          seat.touched = true;
-          console.log(`[fill] ${seat.poolName} waits under bin ${seat.maxBinId} active ${activeId}`);
+          const slid = await this.maybeSlideToActive(seat);
+          if (!slid) {
+            seat.touched = true;
+            console.log(`[fill] ${seat.poolName} waits under bin ${seat.maxBinId} active ${activeId}`);
+          }
           continue;
         }
         console.log(`[fill] ${seat.poolName} bid left behind bin ${seat.maxBinId} active ${activeId}`);
@@ -996,6 +991,21 @@ export class DegenLpBot {
     this.syncActive();
     saveState(this.state);
     console.log(`[scale] ${seat.poolName} ${before.toFixed(3)} -> ${seat.solDeployed.toFixed(3)} SOL`);
+  }
+
+  /**
+   * Step a still-SOL bid into the active bin when the share of the next sell
+   * clears two transactions. Returns false when the resting bid is the better seat.
+   */
+  private async maybeSlideToActive(seat: ActivePosition): Promise<boolean> {
+    if (seat.filled || (seat.slides ?? 0) >= MAX_BID_SLIDES) return false;
+    const pool = this.lastPools.find((row) => row.poolAddress === seat.poolAddress);
+    if (!pool || !chopConfirmed(pool)) return false;
+    const solPx = pool.solPrice || seat.solPrice || 0;
+    if (!offBinSlidePays(pool, seat.solDeployed * solPx, config.txCostUsd, config.minEdgeUsd)) return false;
+    console.log(`[fill] ${seat.poolName} slide into active bin from ${seat.maxBinId}`);
+    await this.slideSeat(seat, pool);
+    return true;
   }
 
   /** Step a SOL bid up one bin. A failed redeposit closes the seat without removing it twice. */
