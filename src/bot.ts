@@ -119,6 +119,7 @@ export class DegenLpBot {
   private poolWatch = new Map<string, () => void>();
   private exitFlight = new Map<string, Promise<void>>();
   private slideFlight = new Map<string, Promise<void>>();
+  private scaleFlight = new Map<string, Promise<void>>();
   private lastPools: PoolCandidate[] = [];
   private fillTimer: ReturnType<typeof setInterval> | null = null;
   private fillPollFlight: Promise<void> | null = null;
@@ -242,7 +243,7 @@ export class DegenLpBot {
       plan.opens.length && plan.closes.length ? "rotate" :
       plan.opens.length ? "enter" :
       plan.closes.length ? "exit" :
-      plan.slides.length ? "adjust" :
+      plan.slides.length || plan.adds.length ? "adjust" :
       this.state.seats.length ? "stay" : "wait";
     return {
       poolAddress: pool?.poolAddress ?? seat?.poolAddress ?? "none",
@@ -658,6 +659,11 @@ export class DegenLpBot {
       if (!seat) continue;
       await this.closeSeat(seat, close.reason, close.action);
     }
+    for (const add of plan.adds) {
+      const seat = this.state.seats.find((row) => row.id === add.id);
+      if (!seat || seat.filled) continue;
+      await this.scaleSeat(seat, add.solDeploy);
+    }
     let opened = 0;
     for (const open of plan.opens) {
       if (opened >= config.fleetOpensPerScan) break;
@@ -894,6 +900,43 @@ export class DegenLpBot {
       console.log(`[fill] ${seat.poolName} ${reason} bin ${seat.maxBinId} active ${activeId}`);
       await this.closeSeat(seat, reason, "exit");
     }
+  }
+
+  /** Add SOL to a one-bin bid that is still in the fee bin. A failed add leaves the seat open. */
+  private scaleSeat(seat: ActivePosition, solDeploy: number): Promise<void> {
+    const existing = this.scaleFlight.get(seat.id);
+    if (existing) return existing;
+    const flight = this.finishScale(seat, solDeploy).finally(() => {
+      this.scaleFlight.delete(seat.id);
+    });
+    this.scaleFlight.set(seat.id, flight);
+    return flight;
+  }
+
+  private async finishScale(seat: ActivePosition, solDeploy: number): Promise<void> {
+    if (this.exitFlight.has(seat.id) || this.slideFlight.has(seat.id)) return;
+    if (!this.state.seats.some((row) => row.id === seat.id) || seat.filled) return;
+    const increment = solDeploy - seat.solDeployed;
+    if (!(increment > 0)) return;
+    const before = seat.solDeployed;
+
+    let next = solDeploy;
+    if (!config.dryRun && this.executor) {
+      const result = await this.executor.addSol(seat, increment);
+      if (!result.ok) {
+        console.error(`[scale] ${seat.poolName} skipped: ${result.reason}`);
+        return;
+      }
+      next = result.solDeployed;
+      seat.entrySignature = result.signature;
+    }
+
+    seat.solDeployed = next;
+    seat.costsUsd += config.txCostUsd;
+    this.state.book.adjusts += 1;
+    this.syncActive();
+    saveState(this.state);
+    console.log(`[scale] ${seat.poolName} ${before.toFixed(3)} -> ${seat.solDeployed.toFixed(3)} SOL`);
   }
 
   /** Step a SOL bid up one bin. A failed redeposit closes the seat without removing it twice. */

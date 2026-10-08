@@ -25,6 +25,10 @@ export type SlideResult =
       solDeployed: number;
     }
   | { ok: false; flat: boolean; reason: string };
+
+export type AddResult =
+  | { ok: true; solDeployed: number; signature: string }
+  | { ok: false; reason: string };
 import { capDeploySol, loadWalletKeypair, SOL_RESERVE_LAMPORTS } from "./wallet.js";
 
 const TOKEN_PROGRAMS = [
@@ -198,6 +202,60 @@ export class DlmmExecutor {
       maxBinId,
       entrySignature,
     });
+  }
+
+  /**
+   * Add SOL to an existing one-bin bid. The position stays on the same bin.
+   * Refuses once the meme is in it, or once the active bin has moved.
+   * solDeployed on success is the new total, not the increment.
+   */
+  async addSol(position: ActivePosition, addSolAmount: number): Promise<AddResult> {
+    if (config.dryRun) return { ok: false, reason: "paper add stays in the bot" };
+    if (!(addSolAmount > 0) || position.minBinId !== position.maxBinId) {
+      return { ok: false, reason: "nothing to add" };
+    }
+    const meme = await this.positionMemeRaw(position.poolAddress, position.positionAddress, position.tokenMint);
+    if (meme > DUST_RAW) return { ok: false, reason: "meme still in the bid" };
+
+    const dlmm = await DLMM.create(this.connection, new PublicKey(position.poolAddress));
+    const active = await dlmm.getActiveBin();
+    if (active.binId !== position.maxBinId) return { ok: false, reason: "bid left the active bin" };
+
+    const tokenX = dlmm.tokenX.publicKey.toBase58();
+    const tokenY = dlmm.tokenY.publicKey.toBase58();
+    const solIsY = tokenY === SOL_MINT;
+    if (tokenX !== SOL_MINT && !solIsY) return { ok: false, reason: "pool has no SOL side" };
+
+    let added = 0;
+    try {
+      const lamports = await this.connection.getBalance(this.wallet.publicKey, "confirmed");
+      added = capDeploySol(addSolAmount, lamports);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "fee reserve";
+      return { ok: false, reason };
+    }
+    if (!(added > 0)) return { ok: false, reason: "nothing to add" };
+
+    try {
+      const deployLamports = Math.floor(added * 1e9);
+      const tx = await dlmm.addLiquidityByStrategy({
+        positionPubKey: new PublicKey(position.positionAddress),
+        user: this.wallet.publicKey,
+        totalXAmount: new BN(solIsY ? 0 : deployLamports),
+        totalYAmount: new BN(solIsY ? deployLamports : 0),
+        strategy: {
+          minBinId: position.minBinId,
+          maxBinId: position.maxBinId,
+          strategyType: StrategyType.Spot,
+        },
+        slippage: 1,
+      });
+      const signature = await sendAndConfirmTransaction(this.connection, tx, [this.wallet]);
+      return { ok: true, solDeployed: position.solDeployed + added, signature };
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "add failed";
+      return { ok: false, reason };
+    }
   }
 
   /**

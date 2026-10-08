@@ -6,6 +6,7 @@ import { bidLeftBehind, binsAboveEntry, dipThrough, MAX_BID_SLIDES, slideInstead
 import { feePerBin, feeRateClears, microChopOk } from "./travel.js";
 import { computeMetrics, planPosition, rankPools, type Metrics } from "./scorer.js";
 import type { ActivePosition, BotDecision, PoolCandidate } from "./types.js";
+import { SOL_RESERVE_LAMPORTS } from "./wallet.js";
 
 export type SeatStrategy = "skim" | "core";
 
@@ -33,6 +34,16 @@ export interface FleetSlide {
   reason: string;
 }
 
+export interface FleetAdd {
+  id: string;
+  /** New total SOL for the seat, not the increment. */
+  solDeploy: number;
+  reason: string;
+}
+
+/** A seat may be this many dollars when the quote is green, even under the share cap. */
+export const SEAT_FLOOR_USD = 50;
+
 export interface FleetPreview {
   poolAddress: string;
   poolName: string;
@@ -58,6 +69,7 @@ export interface FleetPlan {
   opens: FleetOpen[];
   holds: FleetHold[];
   slides: FleetSlide[];
+  adds: FleetAdd[];
   preview: FleetPreview[];
   summary: string;
 }
@@ -110,6 +122,58 @@ function tapeBlocksEntry(pool: PoolCandidate, moves?: Record<string, number>): b
 
 function floorSol(value: number): number {
   return Math.floor(Math.max(value, 0) * 1e6) / 1e6;
+}
+
+/**
+ * Largest SOL one seat may use. The share cap scales with the book. Until that
+ * cap reaches $50, a green quote may still use $50, and never more than the
+ * deploy budget. A wider Meteora position is not a larger fee: the swap pays
+ * one bin.
+ */
+export function seatCeilingSol(deploySol: number, solPrice: number): number {
+  if (!(deploySol > 0)) return 0;
+  const share = Math.min(0.5, Math.max(0.05, config.fleetMaxSeatShare));
+  const byShare = deploySol * share;
+  const byDollars = solPrice > 0 ? SEAT_FLOOR_USD / solPrice : 0;
+  return floorSol(Math.min(deploySol, Math.max(byShare, byDollars)));
+}
+
+function bookSolPrice(pools: PoolCandidate[], seats: ActivePosition[]): number {
+  for (const pool of pools) if (pool.solPrice > 0) return pool.solPrice;
+  for (const seat of seats) if ((seat.solPrice ?? 0) > 0) return seat.solPrice ?? 0;
+  return 0;
+}
+
+/** Sizes to quote, largest first. The green size with the most dollars wins. */
+function seatSizes(ceiling: number): number[] {
+  const out: number[] = [];
+  for (const size of [ceiling, ceiling * 0.5, ceiling * 0.25, config.fleetMinSlot]) {
+    const floored = floorSol(Math.min(size, ceiling));
+    if (floored < config.fleetMinSlot - 1e-9) continue;
+    if (!out.includes(floored)) out.push(floored);
+  }
+  return out;
+}
+
+type SkimPick = { pool: PoolCandidate; metrics: Metrics; solDeploy: number };
+
+/** Largest quoted size that is still green. Sizes are tried biggest first. */
+function bestSkim(
+  pool: PoolCandidate,
+  ceiling: number,
+  moves: Record<string, number> | undefined,
+): SkimPick | null {
+  for (const size of seatSizes(ceiling)) {
+    const quoted = skimQuote(pool, size, moves);
+    if (!quoted.metrics.metThreshold || quoted.metrics.edgeUsd <= 0) continue;
+    return { pool: quoted.pool, metrics: quoted.metrics, solDeploy: size };
+  }
+  return null;
+}
+
+/** Live adds go through capDeploySol, which refuses a spend under the fee reserve. */
+function minAddSol(): number {
+  return Math.max(config.fleetMinSlot, SOL_RESERVE_LAMPORTS / 1e9);
 }
 
 function isSkim(seat: ActivePosition): boolean {
@@ -208,12 +272,22 @@ function onePoolPerMint(pools: PoolCandidate[]): PoolCandidate[] {
   return [...best.values()];
 }
 
+function toSkimOpen(row: SkimPick): FleetOpen {
+  return {
+    pool: row.pool,
+    metrics: row.metrics,
+    solDeploy: row.solDeploy,
+    strategy: "skim",
+    reason: `skim edge $${row.metrics.edgeUsd.toFixed(3)} after costs`,
+  };
+}
+
 function pickSkims(
   pools: PoolCandidate[],
   budget: number,
   blocked: Set<string>,
   moves: Record<string, number> | undefined,
-  seatCap: number,
+  ceiling: number,
   seatedMints: Set<string>,
 ): FleetOpen[] {
   // Quote every sibling. Fee/TVL picks the row on the gate. It must not drop
@@ -226,30 +300,82 @@ function pickSkims(
       !tapeBlocksEntry(pool, moves) &&
       !entryBlocked(pool),
   );
-  if (budget < config.fleetMinSlot || seatCap < config.fleetMinSlot || !ranked.length) return [];
-  const maxSeats = Math.max(1, Math.floor(config.fleetSlots));
-  for (let n = maxSeats; n >= 1; n -= 1) {
-    const slot = Math.min(floorSol(budget / n), seatCap);
-    if (slot < config.fleetMinSlot) continue;
-    const byMint = new Map<string, { pool: PoolCandidate; metrics: Metrics }>();
-    for (const pool of ranked) {
-      const quoted = skimQuote(pool, slot, moves);
-      if (!quoted.metrics.metThreshold || quoted.metrics.edgeUsd <= 0) continue;
-      const key = pool.tokenMint || pool.poolAddress;
-      const have = byMint.get(key);
-      if (!have || skimAhead(quoted, have)) byMint.set(key, quoted);
-    }
-    const pass = [...byMint.values()].sort((a, b) => (skimAhead(a, b) ? -1 : skimAhead(b, a) ? 1 : 0));
-    if (pass.length < n) continue;
-    return pass.slice(0, n).map((row) => ({
-      pool: row.pool,
-      metrics: row.metrics,
-      solDeploy: slot,
-      strategy: "skim" as const,
-      reason: `skim edge $${row.metrics.edgeUsd.toFixed(3)} after costs`,
-    }));
+  const cap = floorSol(Math.min(ceiling, budget));
+  if (budget < config.fleetMinSlot || cap < config.fleetMinSlot || !ranked.length) return [];
+  const byMint = new Map<string, SkimPick>();
+  for (const pool of ranked) {
+    const quoted = bestSkim(pool, cap, moves);
+    if (!quoted) continue;
+    const key = pool.tokenMint || pool.poolAddress;
+    const have = byMint.get(key);
+    if (!have || skimAhead(quoted, have)) byMint.set(key, quoted);
   }
-  return [];
+  const pass = [...byMint.values()].sort((a, b) => (skimAhead(a, b) ? -1 : skimAhead(b, a) ? 1 : 0));
+  const opens: FleetOpen[] = [];
+  let left = budget;
+  const maxSeats = Math.max(1, Math.floor(config.fleetSlots));
+  for (const row of pass) {
+    if (opens.length >= maxSeats || left < config.fleetMinSlot - 1e-9) break;
+    let chosen = row;
+    if (row.solDeploy > left + 1e-9) {
+      const clipped = bestSkim(row.pool, floorSol(Math.min(ceiling, left)), moves);
+      if (!clipped) continue;
+      chosen = clipped;
+    }
+    opens.push(toSkimOpen(chosen));
+    left = floorSol(left - chosen.solDeploy);
+  }
+  return opens;
+}
+
+/**
+ * Grow a one-bin SOL bid that is still in the fee bin. The new total is quoted
+ * again. A filled seat, a slide, and a quote that is only green below the
+ * current size stay put. The add is SOL into the same bin, not a wider range.
+ */
+function scaleSeats(
+  seats: ActivePosition[],
+  holds: FleetHold[],
+  pools: PoolCandidate[],
+  freeSol: number,
+  ceiling: number,
+  moves: Record<string, number> | undefined,
+  skip: Set<string>,
+): { adds: FleetAdd[]; free: number } {
+  const minAdd = minAddSol();
+  const waiting: Array<{ id: string; deployed: number; best: SkimPick }> = [];
+  for (const seat of seats) {
+    if (skip.has(seat.id) || !isSkim(seat) || seat.filled === true || seat.minBinId !== seat.maxBinId) continue;
+    const hold = holds.find((row) => row.id === seat.id);
+    if (hold?.reason !== "earning the bin" && hold?.reason !== "bid is SOL again") continue;
+    const pool = pools.find((row) => row.poolAddress === seat.poolAddress);
+    if (!pool || tapeBlocksEntry(pool, moves) || entryBlocked(pool)) continue;
+    const room = floorSol(Math.min(seat.solDeployed + freeSol, ceiling));
+    if (room < seat.solDeployed + minAdd - 1e-9) continue;
+    const best = bestSkim(pool, room, moves);
+    if (!best || best.solDeploy < seat.solDeployed + minAdd - 1e-9) continue;
+    waiting.push({ id: seat.id, deployed: seat.solDeployed, best });
+  }
+  waiting.sort((a, b) => (skimAhead(a.best, b.best) ? -1 : skimAhead(b.best, a.best) ? 1 : 0));
+  const adds: FleetAdd[] = [];
+  let free = freeSol;
+  for (const row of waiting) {
+    const room = floorSol(Math.min(row.deployed + free, ceiling));
+    if (room < row.deployed + minAdd - 1e-9) continue;
+    let target = row.best;
+    if (target.solDeploy > room + 1e-9) {
+      const again = bestSkim(target.pool, room, moves);
+      if (!again || again.solDeploy < row.deployed + minAdd - 1e-9) continue;
+      target = again;
+    }
+    adds.push({
+      id: row.id,
+      solDeploy: target.solDeploy,
+      reason: `scale the bid to ${target.solDeploy.toFixed(3)} SOL`,
+    });
+    free = floorSol(free - (target.solDeploy - row.deployed));
+  }
+  return { adds, free };
 }
 
 function seatIl(seat: ActivePosition, pool: PoolCandidate | undefined, price: number): number {
@@ -489,7 +615,22 @@ export function planFleet(args: {
 
   const allow = (pool: PoolCandidate) => !args.dlmmOnly || pool.venue === "dlmm";
   const seatCap = floorSol(args.deploySol * Math.min(0.5, Math.max(0.05, config.fleetMaxSeatShare)));
+  const ceiling = seatCeilingSol(args.deploySol, bookSolPrice(args.pools, args.seats));
   const quiet = args.freezeOpens || args.boardDown;
+  let adds: FleetAdd[] = [];
+  if (!quiet) {
+    const scaled = scaleSeats(
+      kept,
+      holds,
+      args.pools,
+      free,
+      ceiling,
+      args.moves,
+      new Set(slides.map((row) => row.id)),
+    );
+    adds = scaled.adds;
+    free = scaled.free;
+  }
 
   if (
     coreReopen &&
@@ -543,12 +684,12 @@ export function planFleet(args: {
   }
   const skims = quiet
     ? []
-    : pickSkims(args.pools, free, blocked, args.moves, seatCap, seatedMints).filter((row) => allow(row.pool));
+    : pickSkims(args.pools, free, blocked, args.moves, ceiling, seatedMints).filter((row) => allow(row.pool));
   opens.push(...skims);
   if (args.freezeOpens) opens.length = 0;
 
   const previewSlot =
-    skims[0]?.solDeploy ?? (free >= config.fleetMinSlot ? Math.min(seatCap, free) : seatCap);
+    skims[0]?.solDeploy ?? (free >= config.fleetMinSlot ? Math.min(ceiling, free) : ceiling);
   const previewPools = onePoolPerMint(args.pools.filter((pool) => pool.venue === "dlmm"));
   const previewSeen = new Set(previewPools.map((pool) => pool.poolAddress));
   for (const open of opens) {
@@ -618,9 +759,10 @@ export function planFleet(args: {
   let summary = "no pool clears costs";
   if (args.freezeOpens && !closes.length) {
     summary = "shock pause; no new seats";
-  } else if (opens.length || closes.length || slides.length) {
+  } else if (opens.length || closes.length || slides.length || adds.length) {
     const slideText = slides.length ? ` slide ${slides.length}` : "";
-    summary = `open ${opens.length}${names ? ` (${names})` : ""} close ${closes.length}${slideText}`;
+    const addText = adds.length ? ` add ${adds.length}` : "";
+    summary = `open ${opens.length}${names ? ` (${names})` : ""} close ${closes.length}${slideText}${addText}`;
   } else if (args.seats.length) {
     summary = `holding ${args.seats.length}`;
   } else if (args.boardDown) {
@@ -637,5 +779,5 @@ export function planFleet(args: {
     summary = `no pool clears costs; best ${bestText}`;
   }
 
-  return { closes, opens, holds, slides, preview, summary };
+  return { closes, opens, holds, slides, adds, preview, summary };
 }

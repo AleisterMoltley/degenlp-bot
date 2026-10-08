@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { quoteEdge } from "./edge.js";
-import { downwardMove, planFleet, skimFillFraction } from "./fleet.js";
+import { downwardMove, planFleet, seatCeilingSol, SEAT_FLOOR_USD, skimFillFraction } from "./fleet.js";
 import { halfWidthFromBins } from "./pnl.js";
 import type { ActivePosition, PoolCandidate } from "./types.js";
 
@@ -123,7 +123,8 @@ test("several skim seats open when each quote clears, and a red pool stays out",
   assert.ok(plan.opens.every((row) => row.metrics.metThreshold && row.metrics.edgeUsd >= 0.02));
   assert.ok(sol <= 0.72 + 1e-9);
   assert.ok(plan.opens.every((row) => row.solDeploy >= 0.04));
-  assert.ok(plan.opens.every((row) => row.solDeploy <= 0.72 * 0.22 + 1e-6));
+  assert.ok(plan.opens.every((row) => row.solDeploy <= seatCeilingSol(0.72, 100) + 1e-9));
+  assert.ok(plan.opens.some((row) => row.solDeploy === seatCeilingSol(0.72, 100)));
   assert.equal(new Set(plan.opens.map((row) => row.pool.poolAddress)).size, 2);
   assert.ok(!plan.opens.some((row) => row.pool.poolAddress === "quiet"));
   assert.equal(again.opens.reduce((sum, row) => sum + row.solDeploy, 0), sol);
@@ -283,8 +284,9 @@ test("one pool cannot take the whole book", () => {
   const plan = planFleet({ pools: [paying()], seats: [], deploySol: 0.72, now, dlmmOnly: true });
   assert.equal(plan.opens.length, 1, plan.summary);
   assert.equal(plan.opens[0].pool.side, "bid");
-  assert.ok(plan.opens[0].solDeploy <= 0.72 * 0.22 + 1e-6);
-  assert.ok(plan.opens[0].solDeploy >= 0.04);
+  assert.equal(plan.opens[0].strategy, "skim");
+  assert.equal(plan.opens[0].solDeploy, seatCeilingSol(0.72, 100));
+  assert.ok(plan.opens[0].solDeploy < 0.72);
 });
 
 test("a one-bin snipe stays inside the seat cap", () => {
@@ -302,9 +304,76 @@ test("a one-bin snipe stays inside the seat cap", () => {
   assert.equal(big.strategy, "skim");
   assert.equal(big.pool.side, "bid");
   assert.doesNotMatch(big.reason, /aggressive|curve/);
-  assert.ok(big.solDeploy <= 0.72 * 0.22 + 1e-6);
+  assert.equal(big.solDeploy, seatCeilingSol(0.72, 100));
+  assert.ok(big.solDeploy < 0.72);
   const sol = plan.opens.reduce((sum, row) => sum + row.solDeploy, 0);
   assert.ok(sol <= 0.72 + 1e-9);
+});
+
+test("a larger book raises the seat once the share cap clears fifty dollars", () => {
+  const plan = planFleet({ pools: [paying()], seats: [], deploySol: 5, now, dlmmOnly: true });
+  const skim = plan.opens.find((row) => row.strategy === "skim");
+  assert.ok(skim, plan.summary);
+  assert.equal(skim.solDeploy, seatCeilingSol(5, 100));
+  assert.ok(skim.solDeploy > SEAT_FLOOR_USD / 100);
+  assert.ok(skim.solDeploy < 5);
+  assert.ok(plan.opens.every((row) => row.strategy !== "core" || row.solDeploy <= 5 * 0.22 + 1e-6));
+});
+
+test("a green in-bin bid scales up to the dollar ceiling", () => {
+  const plan = planFleet({
+    pools: [paying({ priceUsd: 1 })],
+    seats: [seat({ solDeployed: 0.12, entryPrice: 1, lastPrice: 1, filled: false })],
+    deploySol: 0.72,
+    now,
+    dlmmOnly: true,
+  });
+  assert.equal(plan.closes.length, 0, plan.closes.map((row) => row.reason).join(","));
+  assert.equal(plan.slides.length, 0);
+  assert.equal(plan.opens.length, 0, plan.summary);
+  assert.equal(plan.adds.length, 1);
+  assert.equal(plan.adds[0]?.solDeploy, seatCeilingSol(0.72, 100));
+  assert.match(plan.holds[0]?.reason ?? "", /earning/);
+});
+
+test("a filled bid and a near-ceiling bid do not scale", () => {
+  const filled = planFleet({
+    pools: [paying({ priceUsd: 1 })],
+    seats: [seat({ solDeployed: 0.12, filled: true, entryPrice: 1, lastPrice: 1 })],
+    deploySol: 0.72,
+    now,
+    dlmmOnly: true,
+  });
+  assert.equal(filled.adds.length, 0);
+
+  const near = planFleet({
+    pools: [paying({ priceUsd: 1 })],
+    seats: [seat({ solDeployed: 0.48, entryPrice: 1, lastPrice: 1 })],
+    deploySol: 0.72,
+    now,
+    dlmmOnly: true,
+  });
+  assert.equal(near.adds.length, 0, near.summary);
+
+  const deep = planFleet({
+    pools: [paying({ priceUsd: 1, binSolUsd: 100_000 })],
+    seats: [seat({ solDeployed: 0.12, entryPrice: 1, lastPrice: 1 })],
+    deploySol: 0.72,
+    now,
+    dlmmOnly: true,
+  });
+  assert.equal(deep.adds.length, 0, deep.summary);
+
+  const paused = planFleet({
+    pools: [paying({ priceUsd: 1 })],
+    seats: [seat({ solDeployed: 0.12, entryPrice: 1, lastPrice: 1 })],
+    deploySol: 0.72,
+    now,
+    dlmmOnly: true,
+    freezeOpens: true,
+  });
+  assert.equal(paused.adds.length, 0);
+  assert.equal(paused.opens.length, 0);
 });
 
 test("a collected 5% fee opens a one-bin bid the drip would refuse", () => {
