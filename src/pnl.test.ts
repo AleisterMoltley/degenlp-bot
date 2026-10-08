@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { accrueFees, halfWidthFromBins, markIlUsd, oneBinBidIl, priceBand } from "./pnl.js";
+import { accrueFees, fillShare, halfWidthFromBins, markIlUsd, oneBinBidIl, priceBand } from "./pnl.js";
 
 test("bin width stays inside a usable band", () => {
   const width = halfWidthFromBins(100, 13);
@@ -58,6 +58,19 @@ test("a one-bin bid books the fill drop and nothing while it is still SOL", () =
   });
   assert.ok(wide > 8);
   assert.ok(oneBin < 1);
+});
+
+test("a partial fill books only its share of the drop", () => {
+  const full = oneBinBidIl({ deployUsd: 24, entryPrice: 1, price: 0.98, filled: true });
+  const part = oneBinBidIl({ deployUsd: 24, entryPrice: 1, price: 0.98, filled: true, fillFraction: 0.25 });
+  assert.ok(Math.abs(full - 0.48) < 1e-9);
+  assert.ok(Math.abs(part - 0.12) < 1e-9);
+  assert.equal(oneBinBidIl({ deployUsd: 24, entryPrice: 1, price: 0.98, filled: false, fillFraction: 0 }), 0);
+  assert.equal(oneBinBidIl({ deployUsd: 24, entryPrice: 1, price: 0.98, filled: true, fillFraction: 0 }), 0);
+  assert.equal(fillShare(500_000_000n, 0.5), 0);
+  assert.ok(Math.abs(fillShare(375_000_000n, 0.5) - 0.25) < 1e-9);
+  assert.equal(fillShare(0n, 0.5), 1);
+  assert.equal(fillShare(1_000_000_000n, 0.5), 0);
 });
 
 test("a filled bid books a loss once price leaves the bottom", () => {

@@ -96,8 +96,12 @@ export function filledSellClears(
 }
 
 /**
- * Never sell inside the unwind. Past it, sell when the move also clears the
- * fee, or when the chop that was supposed to come back has died.
+ * Never sell inside the unwind.
+ * Up: the market sell realizes the run once it also clears the fee, or once
+ * the chop has died. The reverse through the bin would give that run back.
+ * Down: the market sell locks the dip. The reverse through the bin is the
+ * green exit, so a live chop is not sold. A dead chop, or a board that is
+ * falling together, is sold once the dip is past the unwind.
  */
 export function filledShouldSell(args: {
   binsUp: number;
@@ -105,10 +109,13 @@ export function filledShouldSell(args: {
   unwindBps?: number;
   feePct?: number;
   chopAlive: boolean;
+  direction?: "up" | "down";
+  boardDown?: boolean;
 }): boolean {
   const unwind = args.unwindBps ?? 300;
   const pastUnwind = filledSellClears(args.binsUp, args.binStep, unwind, 0);
   if (!pastUnwind) return false;
+  if (args.direction === "down") return args.boardDown === true || !args.chopAlive;
   if (filledSellClears(args.binsUp, args.binStep, unwind, args.feePct ?? 0)) return true;
   return !args.chopAlive;
 }

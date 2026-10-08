@@ -158,8 +158,17 @@ test("a one-bin fill is scratched and a smaller dip is not", () => {
   assert.equal(inside.closes.length, 0, inside.closes.map((row) => row.reason).join(","));
   assert.match(inside.holds[0]?.reason ?? "", /round trip/);
 
-  const scratch = planFleet({
+  const heldDown = planFleet({
     pools: [pool({ priceUsd: 0.92 })],
+    seats: [seat({ enteredAt: now - 10_000, filled: true })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(heldDown.closes.length, 0, heldDown.closes.map((row) => row.reason).join(","));
+  assert.match(heldDown.holds[0]?.reason ?? "", /round trip/);
+
+  const scratch = planFleet({
+    pools: [pool({ priceUsd: 0.92, chopCrossings: 0, chopNetBins: 6 })],
     seats: [seat({ enteredAt: now - 10_000, filled: true })],
     deploySol: 0.72,
     now,
@@ -999,6 +1008,52 @@ test("a deep bin is worth one slide and a bin the sell already reaches is not", 
   });
   assert.equal(chased.slides.length, 0);
   assert.equal(chased.closes[0]?.reason, "bid left behind");
+
+  const down = planFleet({
+    pools: [pool({ priceUsd: 0.99 })],
+    seats: [
+      seat({
+        filled: false,
+        solDeployed: 0.5,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 0.99,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(down.slides.length, 0);
+  assert.equal(down.closes.length, 0, down.closes.map((row) => row.reason).join(","));
+  assert.match(down.holds[0]?.reason ?? "", /waiting for the bin/);
+});
+
+test("a filled one-bin stays when the pool leaves the fee list", () => {
+  const held = planFleet({
+    pools: [],
+    seats: [seat({ filled: true, scanMisses: 4, minBinId: -10, maxBinId: -10 })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(held.closes.length, 0, held.closes.map((row) => row.reason).join(","));
+  assert.match(held.holds[0]?.reason ?? "", /fill stays/);
+
+  const flat = planFleet({
+    pools: [],
+    seats: [seat({ filled: false, scanMisses: 4, minBinId: -10, maxBinId: -10 })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(flat.closes[0]?.reason, "pool left the fee list");
+
+  const wide = planFleet({
+    pools: [],
+    seats: [seat({ filled: true, scanMisses: 4, minBinId: -12, maxBinId: -10 })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(wide.closes[0]?.reason, "pool left the fee list");
 });
 
 test("a watched meme stays on the scanner and does not skip the gate", () => {
@@ -1087,8 +1142,19 @@ test("a shock pause opens nothing and still scratches a fill", () => {
   assert.equal(paused.opens.length, 0);
   assert.match(paused.summary, /shock pause/);
 
-  const scratch = planFleet({
+  const liveDip = planFleet({
     pools: [pool({ priceUsd: 0.92 })],
+    seats: [seat({ enteredAt: now - 10_000, filled: true })],
+    deploySol: 0.72,
+    now,
+    freezeOpens: true,
+  });
+  assert.equal(liveDip.opens.length, 0);
+  assert.equal(liveDip.closes.length, 0, liveDip.closes.map((row) => row.reason).join(","));
+  assert.match(liveDip.holds[0]?.reason ?? "", /round trip/);
+
+  const scratch = planFleet({
+    pools: [pool({ priceUsd: 0.92, chopCrossings: 0, chopNetBins: 6 })],
     seats: [seat({ enteredAt: now - 10_000, filled: true })],
     deploySol: 0.72,
     now,

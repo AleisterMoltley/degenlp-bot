@@ -137,16 +137,35 @@ export class DlmmExecutor {
     return Number.isFinite(sol) && sol > 0 ? sol : null;
   }
 
-  /** Meme principal plus unpaid meme fees. Zero means the bid is still SOL. */
-  async positionMemeRaw(poolAddress: string, positionAddress: string, memeMint: string): Promise<bigint> {
+  /**
+   * Meme principal plus unpaid meme fees, and SOL principal, from one read.
+   * SOL fees are not principal: they must not shrink the fill share.
+   */
+  async positionInventory(
+    poolAddress: string,
+    positionAddress: string,
+    memeMint: string,
+  ): Promise<{ memeRaw: bigint; solLamports: bigint }> {
     const dlmm = await DLMM.create(this.connection, new PublicKey(poolAddress));
     const position = await dlmm.getPosition(new PublicKey(positionAddress));
-    const memeIsX = dlmm.tokenX.publicKey.toBase58() === memeMint;
+    const x = dlmm.tokenX.publicKey.toBase58();
+    const y = dlmm.tokenY.publicKey.toBase58();
     const data = position.positionData;
+    const memeIsX = x === memeMint;
     const principal = BigInt(memeIsX ? data.totalXAmount || "0" : data.totalYAmount || "0");
     const fee = memeIsX ? data.feeX : data.feeY;
-    const feeRaw = BigInt(fee?.toString() || "0");
-    return principal + feeRaw;
+    const solIsY = y === SOL_MINT;
+    const solRaw = solIsY ? data.totalYAmount : x === SOL_MINT ? data.totalXAmount : "0";
+    return {
+      memeRaw: principal + BigInt(fee?.toString() || "0"),
+      solLamports: BigInt(solRaw || "0"),
+    };
+  }
+
+  /** Meme principal plus unpaid meme fees. Zero means the bid is still SOL. */
+  async positionMemeRaw(poolAddress: string, positionAddress: string, memeMint: string): Promise<bigint> {
+    const snap = await this.positionInventory(poolAddress, positionAddress, memeMint);
+    return snap.memeRaw;
   }
 
   async enter(candidate: PoolCandidate, check: OpportunityCheck, solDeploy = config.solDeploy): Promise<ActivePosition> {

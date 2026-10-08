@@ -9,7 +9,7 @@ import { DlmmExecutor, DUST_RAW, enterPositionDryRun } from "./executor.js";
 import { loadWalletKeypair, saveWalletSecret } from "./wallet.js";
 import { fetchMeteoraCandidates } from "./meteora.js";
 import { mergeWatched, watchedMemePools } from "./watched.js";
-import { accrueFees, entryCostUsd, markIlUsd, oneBinBidIl, priceBand } from "./pnl.js";
+import { accrueFees, entryCostUsd, fillShare, markIlUsd, oneBinBidIl, priceBand } from "./pnl.js";
 import { hydratePosition } from "./position.js";
 import { measureRpcLatency, ProofNetworkTelemetry } from "./proofnetwork.js";
 import { chopConfirmed, chopStillPays, offBinSlidePays, planFleet, coolsOff, downwardMove, type FleetOpen, type FleetPlan } from "./fleet.js";
@@ -281,25 +281,28 @@ export class DegenLpBot {
     const deployUsd = pos.solDeployed * sol;
     const inside = price >= pos.priceLower && price <= pos.priceUpper;
     const oneBinBid = pos.strategy === "skim" && pos.side === "bid" && pos.minBinId === pos.maxBinId;
-    const earnedFill = !oneBinBid || pos.touched === true || pos.filled === true;
+    // A one-bin fee is the swap that fills the bin. The pool's 30-minute TVL
+    // drip is not that fee, and booking it prints a green close the wallet
+    // did not earn. Wider seats still use the drip.
+    if (pool && deployUsd > 0 && !oneBinBid) {
+      pos.feesAccruedUsd += accrueFees({
+        fees30mUsd: pool.fee30mUsd,
+        tvlUsd: pool.pairLiquidityUsd,
+        deployUsd,
+        elapsedMin,
+        inRange: pos.side === "full" || inside,
+        side: pos.side,
+        rangeHalfWidth: pos.rangeHalfWidth,
+      });
+    }
     if (pool && deployUsd > 0) {
-      if (earnedFill) {
-        pos.feesAccruedUsd += accrueFees({
-          fees30mUsd: pool.fee30mUsd,
-          tvlUsd: pool.pairLiquidityUsd,
-          deployUsd,
-          elapsedMin,
-          inRange: pos.side === "full" || inside,
-          side: pos.side,
-          rangeHalfWidth: pos.rangeHalfWidth,
-        });
-      }
       pos.ilUsd = oneBinBid
         ? oneBinBidIl({
             deployUsd,
             entryPrice: pos.entryPrice,
             price,
             filled: pos.filled === true,
+            fillFraction: pos.fillFraction,
           })
         : markIlUsd({
             deployUsd,
@@ -485,12 +488,15 @@ export class DegenLpBot {
     if (config.dryRun || !this.executor) return;
     for (const seat of this.state.seats) {
       try {
-        const raw = await this.executor.positionMemeRaw(seat.poolAddress, seat.positionAddress, seat.tokenMint);
+        const snap = await this.executor.positionInventory(seat.poolAddress, seat.positionAddress, seat.tokenMint);
         // Fee atoms are not a fill. Treating them as one blocks the slide back
         // into the active bin. The same dust line refuses a slide while a real bag remains.
-        const filled = raw > DUST_RAW;
+        const filled = snap.memeRaw > DUST_RAW;
         seat.filled = filled;
         if (filled) seat.touched = true;
+        // A failed read keeps the previous share. Booking the whole seat on a
+        // dust fill would shrink the next size below the wallet.
+        seat.fillFraction = filled ? fillShare(snap.solLamports, seat.solDeployed) : 0;
       } catch {
         console.error("[fill] position read failed");
       }
@@ -902,12 +908,11 @@ export class DegenLpBot {
         continue;
       }
       if (cycle === "scratch" && seat.filled !== true) {
+        // One bin under and still SOL. Stepping down spends two transactions
+        // to become the bag. The sell has to walk back up into this bid.
         if (!scratchNow(activeId, seat.minBinId)) {
-          const slid = await this.maybeSlideToActive(seat);
-          if (!slid) {
-            seat.touched = true;
-            console.log(`[fill] ${seat.poolName} waits under bin ${seat.maxBinId} active ${activeId}`);
-          }
+          seat.touched = true;
+          console.log(`[fill] ${seat.poolName} waits under bin ${seat.maxBinId} active ${activeId}`);
           continue;
         }
         console.log(`[fill] ${seat.poolName} bid left behind bin ${seat.maxBinId} active ${activeId}`);
@@ -924,7 +929,11 @@ export class DegenLpBot {
             binStep: seat.binStep || 80,
             unwindBps: unwind,
             feePct: pool ? collectedFeePct(pool) : 0,
-            chopAlive: pool ? chopStillPays(pool) : true,
+            // A missing catalog row is not a live chop. Past the unwind that
+            // sells; inside it the same check still waits.
+            chopAlive: pool ? chopStillPays(pool) : false,
+            direction: "down",
+            boardDown: this.boardIsDown(this.lastPools, Date.now()),
           })
         ) {
           seat.touched = true;

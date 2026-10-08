@@ -394,6 +394,7 @@ function seatIl(seat: ActivePosition, pool: PoolCandidate | undefined, price: nu
       entryPrice: seat.entryPrice,
       price,
       filled: seat.filled === true,
+      fillFraction: seat.fillFraction,
     });
   }
   return markIlUsd({
@@ -491,7 +492,12 @@ export function planFleet(args: {
   for (const seat of args.seats) {
     const pool = args.pools.find((row) => row.poolAddress === seat.poolAddress);
     if (!pool) {
-      if ((seat.scanMisses ?? 0) >= 4) {
+      // A filled one-bin is meme. Selling because the pool fell off a fee
+      // page locks the dip. The bin watcher still owns that exit.
+      const filledOneBin = isSkim(seat) && seat.minBinId === seat.maxBinId && seat.filled === true;
+      if (filledOneBin) {
+        holds.push({ id: seat.id, reason: "pool missed; the fill stays" });
+      } else if ((seat.scanMisses ?? 0) >= 4) {
         closes.push({ id: seat.id, action: "exit", reason: "pool left the fee list" });
       } else {
         holds.push({ id: seat.id, reason: "pool missed this scan; holding the seat" });
@@ -509,9 +515,10 @@ export function planFleet(args: {
     // bin. Two bins, a dead chop, or a third chase leaves. Closing on the
     // first return to SOL would miss the next sell.
     const binStep = seat.binStep || pool.binStep || 80;
-    // A fill is sold on the way down only once the drop beats the unwind.
-    // Inside that band the market sell locks slippage and skips the fee the
-    // same bin pays when price trades back up through it.
+    // A fill under the bin is meme. Selling it locks the dip. The way back
+    // through the bin pays the fee and clears the mark. A live chop waits.
+    // A dead chop, or a board falling together, sells once the dip is past
+    // the unwind, where a market sell is no longer larger than the move.
     if (oneBinSkim && seat.filled === true) {
       const binsDown = -binsAboveEntry(price, seat.entryPrice, binStep);
       if (
@@ -522,6 +529,8 @@ export function planFleet(args: {
           unwindBps: UNWIND_BPS,
           feePct: collectedFeePct(pool),
           chopAlive: chopStillPays(pool),
+          direction: "down",
+          boardDown: args.boardDown === true,
         })
       ) {
         closes.push({ id: seat.id, action: "exit", reason: "scratched the fill" });
@@ -546,9 +555,10 @@ export function planFleet(args: {
         continue;
       }
     }
-    // Still SOL, off the bin. Two bins is a runner. One bin stays when the
-    // next minute of selling already reaches it, and steps in when the bin is
-    // too deep for that and the share still clears the two transactions.
+    // Still SOL, off the bin. Two bins is a runner. One bin above stays when
+    // the next minute of selling already reaches it, and steps up when the
+    // bin is too deep for that and the share still clears the two transactions.
+    // One bin below does not step down: that pays two transactions to enter a dump.
     if (oneBinSkim && seat.filled !== true) {
       const binsAway = Math.abs(binsAboveEntry(price, seat.entryPrice, binStep));
       const slidesUsed = seat.slides ?? 0;
@@ -559,6 +569,7 @@ export function planFleet(args: {
           continue;
         }
         if (
+          binsAboveEntry(price, seat.entryPrice, binStep) >= 1 - 1e-6 &&
           chopConfirmed(pool) &&
           offBinSlidePays(pool, seat.solDeployed * solPx, config.txCostUsd, config.minEdgeUsd)
         ) {

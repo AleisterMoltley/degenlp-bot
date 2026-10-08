@@ -57,21 +57,38 @@ export function accrueFees(args: {
 }
 
 /**
+ * Share of a one-bin SOL deposit that is no longer SOL.
+ * SOL still in the bin is not a loss. A missing or broken read is a full fill,
+ * which is the larger mark. Extra SOL (a fee atom on the SOL side) is not a fill.
+ */
+export function fillShare(solLamports: bigint, solDeployed: number): number {
+  if (!(solDeployed > 0) || !Number.isFinite(solDeployed)) return 1;
+  const still = Number(solLamports) / 1e9 / solDeployed;
+  if (!Number.isFinite(still)) return 1;
+  return Math.min(1, Math.max(0, 1 - still));
+}
+
+/**
  * Divergence of a one-bin SOL bid. Still SOL is not a loss: the price print
  * does not convert the seat. A fill holds the meme, so the loss is the drop
- * from the fill price, and it cannot exceed the seat. The wide-bid slice
- * (about 35% once price reaches the bottom of the band) does not apply.
+ * from the fill price on the share that actually converted, and it cannot
+ * exceed the seat. A missing share means the whole deposit. The wide-bid
+ * slice (about 35% once price reaches the bottom of the band) does not apply.
  */
 export function oneBinBidIl(args: {
   deployUsd: number;
   entryPrice: number;
   price: number;
   filled: boolean;
+  /** Share of the deposit that is meme. Missing means the whole seat. */
+  fillFraction?: number;
 }): number {
   if (!(args.deployUsd > 0) || !args.filled) return 0;
   if (!(args.entryPrice > 0) || !(args.price > 0) || args.price >= args.entryPrice) return 0;
+  const raw = args.fillFraction;
+  const frac = raw == null || !Number.isFinite(raw) ? 1 : Math.min(1, Math.max(0, raw));
   const drop = (args.entryPrice - args.price) / args.entryPrice;
-  return args.deployUsd * Math.min(1, Math.max(0, drop));
+  return Math.min(args.deployUsd, args.deployUsd * frac * Math.max(0, drop));
 }
 
 /** Mark-to-market divergence versus the deposit. Not a cumulative sum. */

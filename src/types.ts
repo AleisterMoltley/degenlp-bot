@@ -67,6 +67,8 @@ export interface ActivePosition {
   scanMisses?: number;
   /** Meme is in the position right now. */
   filled?: boolean;
+  /** Share of the one-bin deposit that is meme right now. Missing means a full fill when filled is true. */
+  fillFraction?: number;
   /** This bid was filled at least once. Stays set after the meme converts back to SOL. */
   touched?: boolean;
   /** How many times this SOL bid has stepped up under a new price. */
