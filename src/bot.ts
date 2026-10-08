@@ -2,10 +2,10 @@ import { buildCandidates, fetchOriginalOpportunityChecks, fetchTopPumpTokens } f
 import { config } from "./config.js";
 import { bankableUsd, collectedFeePct } from "./edge.js";
 import { chopFromPrices } from "./chop.js";
-import { bidCycle, MAX_BID_SLIDES, slideInsteadOfLeave } from "./fillwatch.js";
+import { bidCycle, MAX_BID_SLIDES, slideIntoActive } from "./fillwatch.js";
 import { binTapeFromIds, feeRateClears, mintShouldSleep, priceBinId } from "./travel.js";
 import { deploySolFor, equitySol, paceSol } from "./growth.js";
-import { DlmmExecutor, enterPositionDryRun } from "./executor.js";
+import { DlmmExecutor, DUST_RAW, enterPositionDryRun } from "./executor.js";
 import { loadWalletKeypair, saveWalletSecret } from "./wallet.js";
 import { fetchMeteoraCandidates } from "./meteora.js";
 import { mergeWatched, watchedMemePools } from "./watched.js";
@@ -478,8 +478,11 @@ export class DegenLpBot {
     for (const seat of this.state.seats) {
       try {
         const raw = await this.executor.positionMemeRaw(seat.poolAddress, seat.positionAddress, seat.tokenMint);
-        seat.filled = raw > 0n;
-        if (raw > 0n) seat.touched = true;
+        // Fee atoms are not a fill. Treating them as one blocks the slide back
+        // into the active bin. The same dust line refuses a slide while a real bag remains.
+        const filled = raw > DUST_RAW;
+        seat.filled = filled;
+        if (filled) seat.touched = true;
       } catch {
         console.error("[fill] position read failed");
       }
@@ -866,29 +869,26 @@ export class DegenLpBot {
       (seat) => seat.poolAddress === poolAddress && seat.side === "bid" && seat.minBinId === seat.maxBinId,
     );
     for (const seat of seats) {
-      const cycle = bidCycle(activeId, seat.minBinId, seat.maxBinId, seat.touched === true || seat.filled === true);
-      if (cycle === "wait") continue;
+      const cycle = bidCycle(activeId, seat.minBinId, seat.maxBinId, seat.filled === true);
+      // On the bin and still SOL. The open is not a fill. noteFills owns the meme balance.
+      if (cycle === "wait" || cycle === "earn") continue;
       if (cycle === "hold") {
         seat.touched = true;
-        seat.filled = true;
         console.log(`[fill] ${seat.poolName} holding bin ${seat.maxBinId} active ${activeId}`);
         continue;
       }
       if (cycle === "rest") {
         seat.touched = true;
-        seat.filled = false;
-        console.log(`[fill] ${seat.poolName} bid is SOL again bin ${seat.maxBinId} active ${activeId}`);
+        console.log(`[fill] ${seat.poolName} meme still in bin ${seat.maxBinId} active ${activeId}`);
         continue;
       }
-      if (cycle === "leave") {
+      if (cycle === "chase") {
         const pool = this.lastPools.find((row) => row.poolAddress === poolAddress);
         const confirmed = pool ? chopConfirmed(pool) : false;
-        if (
-          slideInsteadOfLeave(activeId, seat.maxBinId, seat.filled === true, seat.slides ?? 0, confirmed)
-        ) {
+        if (pool && slideIntoActive(activeId, seat.maxBinId, seat.filled === true, seat.slides ?? 0, confirmed)) {
           await this.slideSeat(seat, pool);
-          continue;
         }
+        continue;
       }
       const reason = cycle === "leave" ? "bid left behind" : "scratched the fill";
       console.log(`[fill] ${seat.poolName} ${reason} bin ${seat.maxBinId} active ${activeId}`);

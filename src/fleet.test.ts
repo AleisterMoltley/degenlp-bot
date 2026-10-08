@@ -198,7 +198,7 @@ test("a one-bin bid does not bank modeled fees before a fill", () => {
     now,
   });
   assert.equal(plan.closes.length, 0, plan.closes.map((row) => row.reason).join(","));
-  assert.match(plan.holds[0]?.reason ?? "", /fill/);
+  assert.match(plan.holds[0]?.reason ?? "", /earning/);
   assert.equal(plan.opens.length, 0);
 });
 
@@ -214,15 +214,24 @@ test("a wider skim still banks a paid seat and does not reopen", () => {
   assert.equal(plan.opens.length, 0);
 });
 
-test("a skim that never pays is closed when the window ends", () => {
-  const plan = planFleet({
+test("a SOL seat in the fee bin stays past the window, and a dip that never returns does not", () => {
+  const earning = planFleet({
     pools: [pool({ priceUsd: 1 })],
-    seats: [seat({ feesAccruedUsd: 0, enteredAt: now - 9 * 60_000 })],
+    seats: [seat({ feesAccruedUsd: 0, enteredAt: now - 9 * 60_000, entryPrice: 1, lastPrice: 1 })],
     deploySol: 0.72,
     now,
   });
-  assert.equal(plan.closes.length, 1);
-  assert.match(plan.closes[0].reason, /skim window closed/);
+  assert.equal(earning.closes.length, 0, earning.closes.map((row) => row.reason).join(","));
+  assert.match(earning.holds[0]?.reason ?? "", /earning/);
+
+  const dipped = planFleet({
+    pools: [pool({ priceUsd: 0.99 })],
+    seats: [seat({ feesAccruedUsd: 0, enteredAt: now - 9 * 60_000, entryPrice: 1, lastPrice: 0.99, binStep: 100 })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(dipped.closes.length, 1);
+  assert.match(dipped.closes[0].reason, /skim window closed/);
 });
 
 test("a dip that stays inside the bid waits for the round trip", () => {
@@ -393,6 +402,30 @@ test("a thin base fee does not open", () => {
   assert.equal(plan.preview[0]?.strategy, "geometry");
 });
 
+test("a flat active bin is a seat and a one-way step is not", () => {
+  const flat = paying({
+    poolAddress: "flat-bin",
+    tokenMint: "flat-bin",
+    poolName: "FLATBIN-SOL",
+    tokenSymbol: "FLATBIN",
+    binTapeCrossings: 0,
+    binTapeNet: 0,
+    binTapeMaxStep: 0,
+  });
+  const opened = planFleet({ pools: [flat], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.equal(opened.opens.length, 1, opened.summary);
+  assert.equal(opened.opens[0]?.pool.poolAddress, "flat-bin");
+
+  const oneWay = paying({
+    binTapeCrossings: 0,
+    binTapeNet: 1,
+    binTapeMaxStep: 1,
+  });
+  const blocked = planFleet({ pools: [oneWay], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.equal(blocked.opens.length, 0);
+  assert.match(blocked.summary, /no travel/);
+});
+
 test("a bin that jumps is not a seat", () => {
   const jumped = paying({ binTapeMaxStep: 3, binTapeNet: 3, fee30mUsd: 80_000, fee1hUsd: 160_000 });
   const plan = planFleet({ pools: [jumped], seats: [], deploySol: 0.72, now, dlmmOnly: true });
@@ -505,6 +538,60 @@ test("a fill inside the bid waits, and the way back to SOL stays", () => {
   });
   assert.equal(back.closes.length, 0, back.closes.map((row) => row.reason).join(","));
   assert.match(back.holds[0]?.reason ?? "", /SOL again/);
+
+  const oneUp = planFleet({
+    pools: [pool({ priceUsd: 1.01 })],
+    seats: [
+      seat({
+        filled: false,
+        touched: false,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.01,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(oneUp.closes.length, 0, oneUp.closes.map((row) => row.reason).join(","));
+  assert.equal(oneUp.slides.length, 1);
+
+  const filledUp = planFleet({
+    pools: [pool({ priceUsd: 1.01 })],
+    seats: [
+      seat({
+        filled: true,
+        touched: true,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.01,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(filledUp.slides.length, 0);
+  assert.match(filledUp.holds[0]?.reason ?? "", /round trip/);
+
+  const insideBin = planFleet({
+    pools: [pool({ priceUsd: 1.005 })],
+    seats: [
+      seat({
+        filled: false,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.005,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(insideBin.slides.length, 0);
+  assert.equal(insideBin.closes.length, 0, insideBin.closes.map((row) => row.reason).join(","));
+  assert.match(insideBin.holds[0]?.reason ?? "", /earning/);
 
   const ran = planFleet({
     pools: [pool({ priceUsd: 1.02 })],

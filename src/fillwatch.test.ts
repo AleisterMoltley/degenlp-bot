@@ -9,7 +9,7 @@ import {
   binsAboveEntry,
   dipThrough,
   slideInstead,
-  slideInsteadOfLeave,
+  slideIntoActive,
   LBPAIR_ACTIVE_ID_OFFSET,
   LBPAIR_DISCRIMINATOR,
 } from "./fillwatch.js";
@@ -41,9 +41,10 @@ test("a batched read keeps only real pair accounts", () => {
   assert.equal(ids.has("d"), false);
 });
 
-test("a round trip holds the bin, rests one bin above, and scratches through it", () => {
-  assert.equal(bidCycle(-123, -124, -124, false), "wait");
-  assert.equal(bidCycle(-124, -124, -124, false), "hold");
+test("a SOL deposit earns in the active bin, chases one bin up, and scratches through it", () => {
+  assert.equal(bidCycle(-124, -124, -124, false), "earn");
+  assert.equal(bidCycle(-124, -124, -124, true), "hold");
+  assert.equal(bidCycle(-123, -124, -124, false), "chase");
   assert.equal(bidCycle(-123, -124, -124, true), "rest");
   assert.equal(bidCycle(-122, -124, -124, true), "leave");
   assert.equal(bidCycle(-122, -124, -124, false), "leave");
@@ -53,14 +54,18 @@ test("a round trip holds the bin, rests one bin above, and scratches through it"
   assert.equal(dipThrough(0.98, 1, 100), true);
   assert.equal(bidLeftBehind(1.01, 1, 100), false);
   assert.equal(bidLeftBehind(1.02, 1, 100), true);
+  assert.ok(Math.abs(binsAboveEntry(1.01, 1, 100) - 1) < 1e-9);
   assert.ok(Math.abs(binsAboveEntry(1.02, 1, 100) - 2) < 1e-9);
+  assert.equal(slideInstead(1, false, 0, true), true);
+  assert.equal(slideInstead(0.5, false, 0, true), false);
   assert.equal(slideInstead(2, false, 0, true), true);
   assert.equal(slideInstead(2, true, 0, true), false);
   assert.equal(slideInstead(2, false, 0, false), false);
   assert.equal(slideInstead(2, false, 3, true), false);
   assert.equal(slideInstead(4, false, 0, true), false);
-  assert.equal(slideInsteadOfLeave(-122, -124, false, 0, true), true);
-  assert.equal(slideInsteadOfLeave(-121, -124, false, 0, true), false);
+  assert.equal(slideIntoActive(-123, -124, false, 0, true), true);
+  assert.equal(slideIntoActive(-122, -124, false, 0, true), false);
+  assert.equal(slideIntoActive(-123, -124, true, 0, true), false);
 });
 
 test("a bid is touched only once price steps onto its bin", () => {

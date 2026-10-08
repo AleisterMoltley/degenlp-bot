@@ -2,7 +2,7 @@ export type BotDecision = "wait" | "enter" | "stay" | "exit" | "adjust" | "rotat
 
 export type PoolVenue = "dlmm" | "damm_v2" | "damm_v1";
 
-/** bid = SOL under the price. curve = both tokens tight around the price. full = both tokens, whole curve. range = both tokens inside a fixed pool range. */
+/** bid = SOL on the bid side, deposited in the active bin. curve = both tokens tight around the price. full = both tokens, whole curve. range = both tokens inside a fixed pool range. */
 export type LpSide = "bid" | "curve" | "full" | "range";
 
 export interface OpportunityCheck {

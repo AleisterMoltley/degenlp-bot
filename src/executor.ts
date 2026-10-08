@@ -33,7 +33,7 @@ const TOKEN_PROGRAMS = [
 ];
 
 /** Below this raw balance Jupiter has no route. It is closed out of the wallet. A real bag is never burned. */
-const DUST_RAW = 10_000n;
+export const DUST_RAW = 10_000n;
 
 interface TokenBag {
   account: string;
@@ -159,9 +159,11 @@ export class DlmmExecutor {
       throw new Error(`pool has no SOL side: ${candidate.poolName}`);
     }
 
-    // One SOL bin under the active price. A curve would buy the meme before any fee arrives.
-    const minBinId = active.binId - 1;
-    const maxBinId = active.binId - 1;
+    // SOL only, in the active bin. A swap pays the bin it consumes, and bins below
+    // earn nothing until a sell walks into them. Spot with the other amount at
+    // zero stays SOL until that sell. It does not buy the meme on the way in.
+    const minBinId = active.binId;
+    const maxBinId = active.binId;
     const totalXAmount = new BN(solIsY ? 0 : deployLamports);
     const totalYAmount = new BN(solIsY ? deployLamports : 0);
 
@@ -210,9 +212,11 @@ export class DlmmExecutor {
     const poolPk = new PublicKey(position.poolAddress);
     const dlmm = await DLMM.create(this.connection, poolPk);
     const active = await dlmm.getActiveBin();
-    const next = active.binId - 1;
+    // One step, and only when that step is the active bin. Landing one short
+    // puts the SOL back where intra-bin sells do not pay it. A two-bin jump is a runner.
+    const next = active.binId;
     if (next <= position.maxBinId) return { ok: false, flat: false, reason: "price came back" };
-    if (next > position.maxBinId + 1) return { ok: false, flat: false, reason: "runner" };
+    if (next !== position.maxBinId + 1) return { ok: false, flat: false, reason: "runner" };
 
     const tokenX = dlmm.tokenX.publicKey.toBase58();
     const tokenY = dlmm.tokenY.publicKey.toBase58();

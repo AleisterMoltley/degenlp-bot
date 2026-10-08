@@ -28,22 +28,23 @@ export function activeIdsFromAccounts(
 }
 
 /**
- * A one-bin bid sits under the price. The fill is the slot that steps the
- * active bin onto that id or through it. Hearing it still takes the next slot.
+ * The active id has reached this bid. For a deposit that already sits in the
+ * active bin, that is the open, not the fill. The fill is meme in the position.
  */
 export function bidTouched(activeId: number, maxBinId: number): boolean {
   return Number.isInteger(activeId) && Number.isInteger(maxBinId) && activeId <= maxBinId;
 }
 
-export type BidCycle = "wait" | "hold" | "rest" | "leave" | "scratch";
+export type BidCycle = "wait" | "earn" | "hold" | "rest" | "chase" | "leave" | "scratch";
 
 /**
- * One-bin SOL bid.
- * Above the bin, still untouched: wait.
- * On the bin: hold. The pool's reverse swap turns the meme back into SOL.
- * One bin above after a fill: rest. The bid is SOL again and can fill again.
- * Two or more bins above: leave. The bid is no longer the next sell.
- * Below the bin: scratch. The reverse swap did not come.
+ * One-bin SOL deposit in the active bin. Fees are paid by the bin a swap uses.
+ * On our bin, still SOL: earn. Do not mark that as a fill.
+ * On our bin, meme in the position: hold. The reverse swap turns it back into SOL.
+ * One bin above, still SOL: chase. The deposit is stale and the next sell misses it.
+ * One bin above, meme still in: rest. Do not slide the meme up.
+ * Two or more bins above: leave. That is a runner, not a one-bin step.
+ * Below the bin: scratch.
  */
 export function bidCycle(
   activeId: number,
@@ -56,8 +57,8 @@ export function bidCycle(
   }
   if (activeId < minBinId) return "scratch";
   if (activeId > maxBinId + 1) return "leave";
-  if (activeId > maxBinId) return seenFill ? "rest" : "wait";
-  return "hold";
+  if (activeId > maxBinId) return seenFill ? "rest" : "chase";
+  return seenFill ? "hold" : "earn";
 }
 
 /** Price stand-in when the scan has no bin id. Past the bid, short of a clean two-bin break. */
@@ -85,16 +86,19 @@ export function binsAboveEntry(price: number, entry: number, binStep: number): n
 export const MAX_BID_SLIDES = 3;
 
 /**
- * The bid is SOL and the price is only about two bins above it.
- * One step up puts it under the next sell. A runner, a dead chop, or meme still in the bin does not slide.
+ * The bid is still SOL and the price has left its bin, short of a runner.
+ * One step can land back in the active bin. Meme in the position does not slide.
  */
 export function slideInstead(binsUp: number, filled: boolean, slides: number, chopConfirmed: boolean): boolean {
   if (filled || !chopConfirmed || slides >= MAX_BID_SLIDES) return false;
-  return binsUp >= 1.5 - 1e-6 && binsUp <= 2.5;
+  return binsUp >= 1 - 1e-6 && binsUp <= 2.5;
 }
 
-/** Chain id version. Rest is one bin above. The next bin can slide. Anything farther leaves. */
-export function slideInsteadOfLeave(
+/**
+ * The chain active bin is exactly one above a SOL bid.
+ * The next deposit is that active bin. Two bins above is a runner and does not slide.
+ */
+export function slideIntoActive(
   activeId: number,
   maxBinId: number,
   filled: boolean,
@@ -103,5 +107,5 @@ export function slideInsteadOfLeave(
 ): boolean {
   if (filled || !chopConfirmed || slides >= MAX_BID_SLIDES) return false;
   if (!Number.isInteger(activeId) || !Number.isInteger(maxBinId)) return false;
-  return activeId === maxBinId + 2;
+  return activeId === maxBinId + 1;
 }

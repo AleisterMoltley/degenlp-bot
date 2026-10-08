@@ -2,7 +2,7 @@ import { chopShapeOk, depthOk } from "./chop.js";
 import { config } from "./config.js";
 import { bankableUsd, trailGaveBack } from "./edge.js";
 import { halfWidthFromBins, markIlUsd } from "./pnl.js";
-import { bidLeftBehind, binsAboveEntry, dipThrough, slideInstead } from "./fillwatch.js";
+import { bidLeftBehind, binsAboveEntry, dipThrough, MAX_BID_SLIDES, slideInstead } from "./fillwatch.js";
 import { feePerBin, feeRateClears, microChopOk } from "./travel.js";
 import { computeMetrics, planPosition, rankPools, type Metrics } from "./scorer.js";
 import type { ActivePosition, BotDecision, PoolCandidate } from "./types.js";
@@ -320,25 +320,43 @@ export function planFleet(args: {
     const drop = dropOf(pool, args.moves);
     const fast = drop >= Math.max(step, 0.01);
     const oneBinSkim = isSkim(seat) && seat.minBinId === seat.maxBinId && seat.entryPrice > 0;
-    // Each cross earns the fee and leaves the bid in SOL. Closing there pays two
-    // transactions and misses the next sell. A short step up, while the chop is
-    // still reversing, moves the same SOL under the new price. A runner, a dead
-    // chop, or a break through the bid still leaves.
+    // Fees are paid in the active bin. The seat stays there while it is SOL.
+    // A one-bin step up slides back into the new active bin. A runner, a dead
+    // chop, or a break through the bid still leaves. Closing on the first
+    // return to SOL would miss the next sell.
     const binStep = seat.binStep || pool.binStep || 80;
     if (oneBinSkim && dipThrough(price, seat.entryPrice, binStep)) {
       closes.push({ id: seat.id, action: "exit", reason: "scratched the fill" });
       continue;
     }
-    if (oneBinSkim && bidLeftBehind(price, seat.entryPrice, binStep)) {
-      const binsUp = binsAboveEntry(price, seat.entryPrice, binStep);
-      if (slideInstead(binsUp, seat.filled === true, seat.slides ?? 0, chopConfirmed(pool))) {
-        slides.push({ id: seat.id, reason: "slide the bid up under the price" });
-        continue;
-      }
+    // A filled seat that runs does not slide. The meme stays until the price
+    // comes back, and a runner still leaves.
+    if (oneBinSkim && seat.filled === true && bidLeftBehind(price, seat.entryPrice, binStep)) {
       closes.push({ id: seat.id, action: "exit", reason: "bid left behind" });
       continue;
     }
-    if (oneBinSkim && seat.touched && !seat.filled && price >= seat.entryPrice) {
+    // Still SOL, and the price has left the bin we are in. One step lands in
+    // the active bin, which is the bin that pays. A missing tape does not slide
+    // and does not evict. A dead chop, a third slide, or a runner does.
+    if (oneBinSkim && seat.filled !== true) {
+      const binsUp = binsAboveEntry(price, seat.entryPrice, binStep);
+      if (binsUp >= 1 - 1e-6) {
+        const slidesUsed = seat.slides ?? 0;
+        if (slideInstead(binsUp, false, slidesUsed, chopConfirmed(pool))) {
+          slides.push({ id: seat.id, reason: "slide the bid into the active bin" });
+          continue;
+        }
+        if (binsUp > 2.5 || slidesUsed >= MAX_BID_SLIDES || !chopStillPays(pool)) {
+          closes.push({ id: seat.id, action: "exit", reason: "bid left behind" });
+          continue;
+        }
+        holds.push({ id: seat.id, reason: "waiting for the bin" });
+        continue;
+      }
+    }
+    // Inside the fee bin and still SOL. The 8-minute clock does not evict it.
+    // Modeled drip fees are not a fill, so this does not bank. A dead chop does.
+    if (oneBinSkim && !seat.filled && price >= seat.entryPrice) {
       const priceReady = (pool.chopSamples ?? 0) >= 4;
       const binReady = (pool.binTapeSamples ?? 0) >= 8 && (pool.binTapeSpanMs ?? 0) >= 45_000;
       const since = seat.slidAt ?? seat.enteredAt;
@@ -347,7 +365,7 @@ export function planFleet(args: {
         closes.push({ id: seat.id, action: "exit", reason: "chop ended" });
         continue;
       }
-      holds.push({ id: seat.id, reason: "bid is SOL again" });
+      holds.push({ id: seat.id, reason: seat.touched ? "bid is SOL again" : "earning the bin" });
       continue;
     }
     if (oneBinSkim && (seat.filled || price < seat.entryPrice)) {
@@ -363,17 +381,6 @@ export function planFleet(args: {
         continue;
       }
       holds.push({ id: seat.id, reason: "waiting for the round trip" });
-      continue;
-    }
-    // Modeled drip fees are not a fill. An unfilled one-bin bid stays until the
-    // window ends. It does not bank a print it has not earned.
-    if (oneBinSkim && !seat.touched && !seat.filled) {
-      const since = seat.slidAt ?? seat.enteredAt;
-      if (args.now - since >= config.fleetMaxLifeMs) {
-        closes.push({ id: seat.id, action: "exit", reason: "skim window closed" });
-        continue;
-      }
-      holds.push({ id: seat.id, reason: "waiting for the fill" });
       continue;
     }
     if (seat.side === "bid" && seat.entryPrice > 0) {

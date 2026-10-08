@@ -37,12 +37,16 @@ export function binTapeFromIds(
   };
 }
 
-/** Small steps that reverse, held for about a minute. A jump through the bin is a fill. */
+/**
+ * About a minute of steps no bigger than one bin, and no one-way run.
+ * A flat active id is in-bin flow. That is where the fee is paid, so crossings may be zero.
+ * A jump, a missing tape, or a net move of more than one bin is not a seat.
+ */
 export function microChopOk(read: BinTapeRead, minSpanMs = 45_000, minSamples = 8): boolean {
   if (read.samples < minSamples || read.spanMs < minSpanMs) return false;
   if (!(read.maxStep <= 1)) return false;
-  if (read.crossings < 2) return false;
-  return read.crossings >= read.netBins && read.netBins <= 1;
+  if (read.netBins > 1) return false;
+  return read.crossings >= read.netBins;
 }
 
 /** Base fee has to clear one bin of adverse move plus the unwind. */
