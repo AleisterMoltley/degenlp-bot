@@ -14,6 +14,17 @@ import { activeIdFromPool, activeIdsFromAccounts } from "./fillwatch.js";
 import { buildJupiterSwap, sellSlices, SOL_MINT } from "./jupiter.js";
 import { buildPosition } from "./position.js";
 import type { ActivePosition, OpportunityCheck, PoolCandidate } from "./types.js";
+
+export type SlideResult =
+  | {
+      ok: true;
+      positionAddress: string;
+      minBinId: number;
+      maxBinId: number;
+      signature: string;
+      solDeployed: number;
+    }
+  | { ok: false; flat: boolean; reason: string };
 import { capDeploySol, loadWalletKeypair, SOL_RESERVE_LAMPORTS } from "./wallet.js";
 
 const TOKEN_PROGRAMS = [
@@ -185,6 +196,77 @@ export class DlmmExecutor {
       maxBinId,
       entrySignature,
     });
+  }
+
+  /**
+   * Move a one-bin SOL bid up one bin. Refuses while the meme is still in the position.
+   * If the remove lands and the new deposit does not, the seat is flat and the caller must not exit again.
+   */
+  async slideSolBid(position: ActivePosition): Promise<SlideResult> {
+    if (config.dryRun) return { ok: false, flat: false, reason: "paper slide stays in the bot" };
+    const meme = await this.positionMemeRaw(position.poolAddress, position.positionAddress, position.tokenMint);
+    if (meme > DUST_RAW) return { ok: false, flat: false, reason: "meme still in the bid" };
+
+    const poolPk = new PublicKey(position.poolAddress);
+    const dlmm = await DLMM.create(this.connection, poolPk);
+    const active = await dlmm.getActiveBin();
+    const next = active.binId - 1;
+    if (next <= position.maxBinId) return { ok: false, flat: false, reason: "price came back" };
+    if (next > position.maxBinId + 1) return { ok: false, flat: false, reason: "runner" };
+
+    const tokenX = dlmm.tokenX.publicKey.toBase58();
+    const tokenY = dlmm.tokenY.publicKey.toBase58();
+    const solIsY = tokenY === SOL_MINT;
+    if (tokenX !== SOL_MINT && !solIsY) return { ok: false, flat: false, reason: "pool has no SOL side" };
+
+    try {
+      const txs = await dlmm.removeLiquidity({
+        position: new PublicKey(position.positionAddress),
+        user: this.wallet.publicKey,
+        fromBinId: position.minBinId,
+        toBinId: position.maxBinId,
+        bps: new BN(10_000),
+        shouldClaimAndClose: true,
+      });
+      for (const tx of txs) {
+        await sendAndConfirmTransaction(this.connection, tx, [this.wallet]);
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "remove failed";
+      return { ok: false, flat: false, reason };
+    }
+
+    const positionKp = Keypair.generate();
+    try {
+      const lamports = await this.connection.getBalance(this.wallet.publicKey, "confirmed");
+      const solDeployed = capDeploySol(position.solDeployed, lamports);
+      if (!(solDeployed > 0)) return { ok: false, flat: true, reason: "fee reserve" };
+      const deployLamports = Math.floor(solDeployed * 1e9);
+      const tx = await dlmm.initializePositionAndAddLiquidityByStrategy({
+        positionPubKey: positionKp.publicKey,
+        user: this.wallet.publicKey,
+        totalXAmount: new BN(solIsY ? 0 : deployLamports),
+        totalYAmount: new BN(solIsY ? deployLamports : 0),
+        strategy: {
+          minBinId: next,
+          maxBinId: next,
+          strategyType: StrategyType.Spot,
+        },
+        slippage: 1,
+      });
+      const signature = await sendAndConfirmTransaction(this.connection, tx, [this.wallet, positionKp]);
+      return {
+        ok: true,
+        positionAddress: positionKp.publicKey.toBase58(),
+        minBinId: next,
+        maxBinId: next,
+        signature,
+        solDeployed,
+      };
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : "redeposit failed";
+      return { ok: false, flat: true, reason };
+    }
   }
 
   async exit(position: ActivePosition, reason: string): Promise<string> {

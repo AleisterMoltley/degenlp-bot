@@ -6,7 +6,10 @@ import {
   bidCycle,
   bidLeftBehind,
   bidTouched,
+  binsAboveEntry,
   dipThrough,
+  slideInstead,
+  slideInsteadOfLeave,
   LBPAIR_ACTIVE_ID_OFFSET,
   LBPAIR_DISCRIMINATOR,
 } from "./fillwatch.js";
@@ -50,6 +53,14 @@ test("a round trip holds the bin, rests one bin above, and scratches through it"
   assert.equal(dipThrough(0.98, 1, 100), true);
   assert.equal(bidLeftBehind(1.01, 1, 100), false);
   assert.equal(bidLeftBehind(1.02, 1, 100), true);
+  assert.ok(Math.abs(binsAboveEntry(1.02, 1, 100) - 2) < 1e-9);
+  assert.equal(slideInstead(2, false, 0, true), true);
+  assert.equal(slideInstead(2, true, 0, true), false);
+  assert.equal(slideInstead(2, false, 0, false), false);
+  assert.equal(slideInstead(2, false, 3, true), false);
+  assert.equal(slideInstead(4, false, 0, true), false);
+  assert.equal(slideInsteadOfLeave(-122, -124, false, 0, true), true);
+  assert.equal(slideInsteadOfLeave(-121, -124, false, 0, true), false);
 });
 
 test("a bid is touched only once price steps onto its bin", () => {

@@ -74,5 +74,6 @@ export function hydratePosition(pos: ActivePosition): ActivePosition {
     priceUpper: band.upper,
     solPrice: pos.solPrice || 0,
     scanMisses: pos.scanMisses ?? 0,
+    slides: pos.slides ?? 0,
   };
 }

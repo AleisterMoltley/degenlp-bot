@@ -73,3 +73,35 @@ export function bidLeftBehind(price: number, entry: number, binStep: number): bo
   const step = Math.max(binStep, 1) / 10_000;
   return price >= entry * (1 + step * 1.5);
 }
+
+/** How many bins the price has risen above the entry. Negative means it fell. */
+export function binsAboveEntry(price: number, entry: number, binStep: number): number {
+  if (!(price > 0) || !(entry > 0)) return 0;
+  const step = Math.max(binStep, 1) / 10_000;
+  return (price / entry - 1) / step;
+}
+
+/** A SOL bid may step up a few times. After that it is chasing. */
+export const MAX_BID_SLIDES = 3;
+
+/**
+ * The bid is SOL and the price is only about two bins above it.
+ * One step up puts it under the next sell. A runner, a dead chop, or meme still in the bin does not slide.
+ */
+export function slideInstead(binsUp: number, filled: boolean, slides: number, chopConfirmed: boolean): boolean {
+  if (filled || !chopConfirmed || slides >= MAX_BID_SLIDES) return false;
+  return binsUp >= 1.5 - 1e-6 && binsUp <= 2.5;
+}
+
+/** Chain id version. Rest is one bin above. The next bin can slide. Anything farther leaves. */
+export function slideInsteadOfLeave(
+  activeId: number,
+  maxBinId: number,
+  filled: boolean,
+  slides: number,
+  chopConfirmed: boolean,
+): boolean {
+  if (filled || !chopConfirmed || slides >= MAX_BID_SLIDES) return false;
+  if (!Number.isInteger(activeId) || !Number.isInteger(maxBinId)) return false;
+  return activeId === maxBinId + 2;
+}

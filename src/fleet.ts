@@ -2,7 +2,7 @@ import { chopShapeOk, depthOk } from "./chop.js";
 import { config } from "./config.js";
 import { bankableUsd, trailGaveBack } from "./edge.js";
 import { halfWidthFromBins, markIlUsd } from "./pnl.js";
-import { bidLeftBehind, dipThrough } from "./fillwatch.js";
+import { bidLeftBehind, binsAboveEntry, dipThrough, slideInstead } from "./fillwatch.js";
 import { feePerBin, feeRateClears, microChopOk } from "./travel.js";
 import { computeMetrics, planPosition, rankPools, type Metrics } from "./scorer.js";
 import type { ActivePosition, BotDecision, PoolCandidate } from "./types.js";
@@ -24,6 +24,11 @@ export interface FleetClose {
 }
 
 export interface FleetHold {
+  id: string;
+  reason: string;
+}
+
+export interface FleetSlide {
   id: string;
   reason: string;
 }
@@ -52,6 +57,7 @@ export interface FleetPlan {
   closes: FleetClose[];
   opens: FleetOpen[];
   holds: FleetHold[];
+  slides: FleetSlide[];
   preview: FleetPreview[];
   summary: string;
 }
@@ -272,6 +278,14 @@ function chopStillPays(pool: PoolCandidate): boolean {
   return priceOk && binOk;
 }
 
+/** A slide spends two transactions, so it needs a tape that is still reversing. A missing tape does not. */
+export function chopConfirmed(pool: PoolCandidate): boolean {
+  const priceReady = (pool.chopSamples ?? 0) >= 4;
+  const binReady = (pool.binTapeSamples ?? 0) >= 8 && (pool.binTapeSpanMs ?? 0) >= 45_000;
+  if (!priceReady && !binReady) return false;
+  return chopStillPays(pool);
+}
+
 export function planFleet(args: {
   pools: PoolCandidate[];
   seats: ActivePosition[];
@@ -287,6 +301,7 @@ export function planFleet(args: {
   const lossCut = args.lossCut ?? config.growthLossCut;
   const closes: FleetClose[] = [];
   const holds: FleetHold[] = [];
+  const slides: FleetSlide[] = [];
   let coreReopen: FleetOpen | null = null;
 
   for (const seat of args.seats) {
@@ -305,29 +320,39 @@ export function planFleet(args: {
     const drop = dropOf(pool, args.moves);
     const fast = drop >= Math.max(step, 0.01);
     const oneBinSkim = isSkim(seat) && seat.minBinId === seat.maxBinId && seat.entryPrice > 0;
-    // Each time the bin trades through the bid, the position earns the fee and
-    // is SOL again. Closing there pays two transactions and misses the next
-    // cross. A break past the bid, a run away upward, or a dead chop still leaves.
+    // Each cross earns the fee and leaves the bid in SOL. Closing there pays two
+    // transactions and misses the next sell. A short step up, while the chop is
+    // still reversing, moves the same SOL under the new price. A runner, a dead
+    // chop, or a break through the bid still leaves.
     const binStep = seat.binStep || pool.binStep || 80;
     if (oneBinSkim && dipThrough(price, seat.entryPrice, binStep)) {
       closes.push({ id: seat.id, action: "exit", reason: "scratched the fill" });
       continue;
     }
     if (oneBinSkim && bidLeftBehind(price, seat.entryPrice, binStep)) {
+      const binsUp = binsAboveEntry(price, seat.entryPrice, binStep);
+      if (slideInstead(binsUp, seat.filled === true, seat.slides ?? 0, chopConfirmed(pool))) {
+        slides.push({ id: seat.id, reason: "slide the bid up under the price" });
+        continue;
+      }
       closes.push({ id: seat.id, action: "exit", reason: "bid left behind" });
       continue;
     }
     if (oneBinSkim && seat.touched && !seat.filled && price >= seat.entryPrice) {
-      if (!chopStillPays(pool)) {
+      const priceReady = (pool.chopSamples ?? 0) >= 4;
+      const binReady = (pool.binTapeSamples ?? 0) >= 8 && (pool.binTapeSpanMs ?? 0) >= 45_000;
+      const since = seat.slidAt ?? seat.enteredAt;
+      const tapeGone = !priceReady && !binReady && args.now - since >= 3 * 60_000;
+      if (tapeGone || !chopStillPays(pool)) {
         closes.push({ id: seat.id, action: "exit", reason: "chop ended" });
         continue;
       }
       holds.push({ id: seat.id, reason: "bid is SOL again" });
       continue;
     }
-    if (oneBinSkim && price < seat.entryPrice) {
+    if (oneBinSkim && (seat.filled || price < seat.entryPrice)) {
       const held = args.now - seat.enteredAt;
-      if (held >= config.fleetMaxLifeMs) {
+      if (price < seat.entryPrice && held >= config.fleetMaxLifeMs) {
         const liveIl = seatIl(seat, pool, price);
         const bankable = bankableUsd(seat.feesAccruedUsd, liveIl, seat.costsUsd, config.txCostUsd);
         closes.push({
@@ -338,6 +363,17 @@ export function planFleet(args: {
         continue;
       }
       holds.push({ id: seat.id, reason: "waiting for the round trip" });
+      continue;
+    }
+    // Modeled drip fees are not a fill. An unfilled one-bin bid stays until the
+    // window ends. It does not bank a print it has not earned.
+    if (oneBinSkim && !seat.touched && !seat.filled) {
+      const since = seat.slidAt ?? seat.enteredAt;
+      if (args.now - since >= config.fleetMaxLifeMs) {
+        closes.push({ id: seat.id, action: "exit", reason: "skim window closed" });
+        continue;
+      }
+      holds.push({ id: seat.id, reason: "waiting for the fill" });
       continue;
     }
     if (seat.side === "bid" && seat.entryPrice > 0) {
@@ -563,8 +599,9 @@ export function planFleet(args: {
   let summary = "no pool clears costs";
   if (args.freezeOpens && !closes.length) {
     summary = "shock pause; no new seats";
-  } else if (opens.length || closes.length) {
-    summary = `open ${opens.length}${names ? ` (${names})` : ""} close ${closes.length}`;
+  } else if (opens.length || closes.length || slides.length) {
+    const slideText = slides.length ? ` slide ${slides.length}` : "";
+    summary = `open ${opens.length}${names ? ` (${names})` : ""} close ${closes.length}${slideText}`;
   } else if (args.seats.length) {
     summary = `holding ${args.seats.length}`;
   } else if (args.boardDown) {
@@ -581,5 +618,5 @@ export function planFleet(args: {
     summary = `no pool clears costs; best ${bestText}`;
   }
 
-  return { closes, opens, holds, preview, summary };
+  return { closes, opens, holds, slides, preview, summary };
 }

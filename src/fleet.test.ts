@@ -172,6 +172,7 @@ test("a skim that gave back a 5% run takes the trail", () => {
     pools: [pool({ priceUsd: 1 })],
     seats: [
       seat({
+        maxBinId: 6,
         feesAccruedUsd: 0.16,
         costsUsd: 0.02,
         peakNetUsd: 1.2,
@@ -189,10 +190,22 @@ test("a skim that gave back a 5% run takes the trail", () => {
   assert.match(plan.closes[0].reason, /trail gave back/);
 });
 
-test("a green skim banks and does not reopen in the same pass", () => {
+test("a one-bin bid does not bank modeled fees before a fill", () => {
   const plan = planFleet({
     pools: [pool({ priceUsd: 1 })],
     seats: [seat({ feesAccruedUsd: 0.1, enteredAt: now - 30_000, entryPrice: 1, lastPrice: 1 })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(plan.closes.length, 0, plan.closes.map((row) => row.reason).join(","));
+  assert.match(plan.holds[0]?.reason ?? "", /fill/);
+  assert.equal(plan.opens.length, 0);
+});
+
+test("a wider skim still banks a paid seat and does not reopen", () => {
+  const plan = planFleet({
+    pools: [pool({ priceUsd: 1 })],
+    seats: [seat({ maxBinId: 6, feesAccruedUsd: 0.1, enteredAt: now - 30_000, entryPrice: 1, lastPrice: 1 })],
     deploySol: 0.72,
     now,
   });
@@ -508,8 +521,64 @@ test("a fill inside the bid waits, and the way back to SOL stays", () => {
     deploySol: 0.72,
     now,
   });
-  assert.equal(ran.closes.length, 1);
-  assert.equal(ran.closes[0].reason, "bid left behind");
+  assert.equal(ran.closes.length, 0, ran.closes.map((row) => row.reason).join(","));
+  assert.equal(ran.slides.length, 1);
+  assert.match(ran.slides[0].reason, /slide/);
+
+  const runner = planFleet({
+    pools: [pool({ priceUsd: 1.05 })],
+    seats: [
+      seat({
+        filled: false,
+        touched: true,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.05,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(runner.slides.length, 0);
+  assert.equal(runner.closes[0]?.reason, "bid left behind");
+
+  const tired = planFleet({
+    pools: [pool({ priceUsd: 1.02 })],
+    seats: [
+      seat({
+        filled: false,
+        touched: true,
+        slides: 3,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.02,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(tired.slides.length, 0);
+  assert.equal(tired.closes[0]?.reason, "bid left behind");
+
+  const deadUp = planFleet({
+    pools: [pool({ priceUsd: 1.02, chopSamples: 8, chopCrossings: 0, chopNetBins: 6 })],
+    seats: [
+      seat({
+        filled: false,
+        touched: true,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.02,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(deadUp.slides.length, 0);
+  assert.equal(deadUp.closes[0]?.reason, "bid left behind");
 
   const dead = planFleet({
     pools: [pool({ priceUsd: 1, chopSamples: 8, chopCrossings: 0, chopNetBins: 6 })],
@@ -528,6 +597,23 @@ test("a fill inside the bid waits, and the way back to SOL stays", () => {
   });
   assert.equal(dead.closes.length, 1);
   assert.equal(dead.closes[0].reason, "chop ended");
+
+  const blind = planFleet({
+    pools: [pool({ priceUsd: 1, chopSamples: 0, chopCrossings: 0, chopNetBins: 0, binTapeSamples: 0, binTapeSpanMs: 0 })],
+    seats: [
+      seat({
+        filled: false,
+        touched: true,
+        enteredAt: now - 4 * 60_000,
+        entryPrice: 1,
+        lastPrice: 1,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(blind.closes[0]?.reason, "chop ended");
 });
 
 test("a watched meme stays on the scanner and does not skip the gate", () => {

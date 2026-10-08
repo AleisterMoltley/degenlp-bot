@@ -2,17 +2,17 @@ import { buildCandidates, fetchOriginalOpportunityChecks, fetchTopPumpTokens } f
 import { config } from "./config.js";
 import { bankableUsd, collectedFeePct } from "./edge.js";
 import { chopFromPrices } from "./chop.js";
-import { bidCycle } from "./fillwatch.js";
+import { bidCycle, MAX_BID_SLIDES, slideInsteadOfLeave } from "./fillwatch.js";
 import { binTapeFromIds, feeRateClears, mintShouldSleep, priceBinId } from "./travel.js";
 import { deploySolFor, equitySol, paceSol } from "./growth.js";
 import { DlmmExecutor, enterPositionDryRun } from "./executor.js";
 import { loadWalletKeypair, saveWalletSecret } from "./wallet.js";
 import { fetchMeteoraCandidates } from "./meteora.js";
 import { mergeWatched, watchedMemePools } from "./watched.js";
-import { accrueFees, entryCostUsd, markIlUsd } from "./pnl.js";
+import { accrueFees, entryCostUsd, markIlUsd, priceBand } from "./pnl.js";
 import { hydratePosition } from "./position.js";
 import { measureRpcLatency, ProofNetworkTelemetry } from "./proofnetwork.js";
-import { planFleet, coolsOff, downwardMove, type FleetOpen, type FleetPlan } from "./fleet.js";
+import { chopConfirmed, planFleet, coolsOff, downwardMove, type FleetOpen, type FleetPlan } from "./fleet.js";
 import { decide, planToCheck, type Plan } from "./scorer.js";
 import { ensureGrowth, loadState, saveState, type BotState, type GrowthLedger } from "./state.js";
 import type { ActivePosition, BotDecision, OpportunityCheck, PoolCandidate } from "./types.js";
@@ -118,6 +118,8 @@ export class DegenLpBot {
   private lastActiveId = new Map<string, number>();
   private poolWatch = new Map<string, () => void>();
   private exitFlight = new Map<string, Promise<void>>();
+  private slideFlight = new Map<string, Promise<void>>();
+  private lastPools: PoolCandidate[] = [];
   private fillTimer: ReturnType<typeof setInterval> | null = null;
   private fillPollFlight: Promise<void> | null = null;
 
@@ -223,6 +225,7 @@ export class DegenLpBot {
       `[scan] ${check.decision} seats=${this.state.seats.length} deploy=${this.deploySol.toFixed(3)} equity=${equity.toFixed(3)} ${plan.summary} ${this.lastScanMs}ms pools=${candidates.length} dlmm=${this.poolCounts.dlmm} damm2=${this.poolCounts.damm_v2} damm1=${this.poolCounts.damm_v1} travel=${travelWatched} watched=${candidates.filter((pool) => pool.watched).length}`,
     );
 
+    this.lastPools = tradable;
     await this.applyFleet(plan);
     await this.pushTelemetry(check);
     this.recordScan(check);
@@ -239,6 +242,7 @@ export class DegenLpBot {
       plan.opens.length && plan.closes.length ? "rotate" :
       plan.opens.length ? "enter" :
       plan.closes.length ? "exit" :
+      plan.slides.length ? "adjust" :
       this.state.seats.length ? "stay" : "wait";
     return {
       poolAddress: pool?.poolAddress ?? seat?.poolAddress ?? "none",
@@ -275,16 +279,20 @@ export class DegenLpBot {
     const sol = pool?.solPrice || pos.solPrice || 0;
     const deployUsd = pos.solDeployed * sol;
     const inside = price >= pos.priceLower && price <= pos.priceUpper;
+    const oneBinBid = pos.strategy === "skim" && pos.side === "bid" && pos.minBinId === pos.maxBinId;
+    const earnedFill = !oneBinBid || pos.touched === true || pos.filled === true;
     if (pool && deployUsd > 0) {
-      pos.feesAccruedUsd += accrueFees({
-        fees30mUsd: pool.fee30mUsd,
-        tvlUsd: pool.pairLiquidityUsd,
-        deployUsd,
-        elapsedMin,
-        inRange: pos.side === "full" || inside,
-        side: pos.side,
-        rangeHalfWidth: pos.rangeHalfWidth,
-      });
+      if (earnedFill) {
+        pos.feesAccruedUsd += accrueFees({
+          fees30mUsd: pool.fee30mUsd,
+          tvlUsd: pool.pairLiquidityUsd,
+          deployUsd,
+          elapsedMin,
+          inRange: pos.side === "full" || inside,
+          side: pos.side,
+          rangeHalfWidth: pos.rangeHalfWidth,
+        });
+      }
       pos.ilUsd = markIlUsd({
         deployUsd,
         entryPrice: pos.entryPrice,
@@ -400,10 +408,19 @@ export class DegenLpBot {
   private async attachBinTravel(pools: PoolCandidate[], now: number): Promise<number> {
     const keepAfter = now - 3 * 60_000;
     const unwindBps = this.unwindBps();
-    const shortlist = pools
+    const ranked = pools
       .filter((pool) => pool.venue === "dlmm" && feeRateClears(pool.baseFeePct ?? 0, pool.binStep ?? 80, unwindBps))
-      .sort((a, b) => collectedFeePct(b) - collectedFeePct(a) || (b.baseFeePct ?? 0) - (a.baseFeePct ?? 0))
-      .slice(0, 12);
+      .sort((a, b) => collectedFeePct(b) - collectedFeePct(a) || (b.baseFeePct ?? 0) - (a.baseFeePct ?? 0));
+    const seatedAddrs = new Set(this.state.seats.map((seat) => seat.poolAddress));
+    const seatedPools = pools.filter((pool) => pool.venue === "dlmm" && seatedAddrs.has(pool.poolAddress));
+    const shortlist: PoolCandidate[] = [];
+    const seen = new Set<string>();
+    for (const pool of [...seatedPools, ...ranked]) {
+      if (seen.has(pool.poolAddress)) continue;
+      seen.add(pool.poolAddress);
+      shortlist.push(pool);
+      if (shortlist.length >= 24) break;
+    }
     const ids = new Map<string, number>();
     if (this.executor) {
       try {
@@ -627,6 +644,12 @@ export class DegenLpBot {
 
   private async applyFleet(plan: FleetPlan) {
     if (!this.liveReady()) return;
+    for (const slide of plan.slides) {
+      const seat = this.state.seats.find((row) => row.id === slide.id);
+      if (!seat) continue;
+      const pool = this.lastPools.find((row) => row.poolAddress === seat.poolAddress);
+      await this.slideSeat(seat, pool);
+    }
     for (const close of plan.closes) {
       const seat = this.state.seats.find((row) => row.id === close.id);
       if (!seat) continue;
@@ -649,10 +672,15 @@ export class DegenLpBot {
     }
   }
 
-  private closeSeat(active: ActivePosition, reason: string, action: BotDecision): Promise<void> {
+  private closeSeat(
+    active: ActivePosition,
+    reason: string,
+    action: BotDecision,
+    alreadyFlat = false,
+  ): Promise<void> {
     const existing = this.exitFlight.get(active.id);
     if (existing) return existing;
-    const flight = this.finishClose(active, reason, action).finally(() => {
+    const flight = this.finishClose(active, reason, action, alreadyFlat).finally(() => {
       this.exitFlight.delete(active.id);
       this.syncWatches(this.state.seats.filter((seat) => seat.side === "bid" && seat.minBinId === seat.maxBinId));
     });
@@ -660,15 +688,24 @@ export class DegenLpBot {
     return flight;
   }
 
-  private async finishClose(active: ActivePosition, reason: string, action: BotDecision) {
+  private async finishClose(
+    active: ActivePosition,
+    reason: string,
+    action: BotDecision,
+    alreadyFlat = false,
+  ) {
     // Sleep only after a run-through or a violent exit. A dust atom still inside the bin can be checked again.
     if (mintShouldSleep(reason, this.lastActiveId.get(active.poolAddress), active.minBinId)) {
       this.mintSleep.set(active.tokenMint, Date.now() + 3 * 60_000);
     }
     let sig = "dry_run_exit";
     if (!config.dryRun && this.executor) {
-      const exists = await this.executor.positionExists(active.positionAddress);
-      sig = await this.executor.exit(active, exists ? reason : "Position not found on-chain - already closed");
+      if (alreadyFlat) {
+        sig = "slide_removed";
+      } else {
+        const exists = await this.executor.positionExists(active.positionAddress);
+        sig = await this.executor.exit(active, exists ? reason : "Position not found on-chain - already closed");
+      }
       const settled = await this.executor.settleMeme(active.tokenMint, active.poolAddress);
       if (settled === "swapped") active.costsUsd += config.txCostUsd;
       if (settled === "stuck") this.cooloff.set(active.poolAddress, Date.now() + 15 * 60_000);
@@ -843,10 +880,84 @@ export class DegenLpBot {
         console.log(`[fill] ${seat.poolName} bid is SOL again bin ${seat.maxBinId} active ${activeId}`);
         continue;
       }
+      if (cycle === "leave") {
+        const pool = this.lastPools.find((row) => row.poolAddress === poolAddress);
+        const confirmed = pool ? chopConfirmed(pool) : false;
+        if (
+          slideInsteadOfLeave(activeId, seat.maxBinId, seat.filled === true, seat.slides ?? 0, confirmed)
+        ) {
+          await this.slideSeat(seat, pool);
+          continue;
+        }
+      }
       const reason = cycle === "leave" ? "bid left behind" : "scratched the fill";
       console.log(`[fill] ${seat.poolName} ${reason} bin ${seat.maxBinId} active ${activeId}`);
       await this.closeSeat(seat, reason, "exit");
     }
+  }
+
+  /** Step a SOL bid up one bin. A failed redeposit closes the seat without removing it twice. */
+  private slideSeat(seat: ActivePosition, pool: PoolCandidate | undefined): Promise<void> {
+    const existing = this.slideFlight.get(seat.id);
+    if (existing) return existing;
+    const flight = this.finishSlide(seat, pool).finally(() => {
+      this.slideFlight.delete(seat.id);
+    });
+    this.slideFlight.set(seat.id, flight);
+    return flight;
+  }
+
+  private async finishSlide(seat: ActivePosition, pool: PoolCandidate | undefined): Promise<void> {
+    if (this.exitFlight.has(seat.id)) return;
+    if ((seat.slides ?? 0) >= MAX_BID_SLIDES) {
+      await this.closeSeat(seat, "bid left behind", "exit");
+      return;
+    }
+    const now = Date.now();
+    if (now - (seat.slidAt ?? 0) < 60_000) return;
+
+    const step = Math.max(seat.binStep || pool?.binStep || 80, 1) / 10_000;
+    const price = pool?.priceUsd && pool.priceUsd > 0 ? pool.priceUsd : seat.entryPrice * (1 + step);
+
+    if (!config.dryRun && this.executor) {
+      const result = await this.executor.slideSolBid(seat);
+      if (!result.ok) {
+        if (result.flat) {
+          seat.costsUsd += config.txCostUsd;
+          await this.closeSeat(seat, "slide failed; bid removed", "exit", true);
+        } else if (result.reason === "meme still in the bid" || result.reason === "runner") {
+          await this.closeSeat(seat, "bid left behind", "exit");
+        } else {
+          console.error(`[slide] ${seat.poolName} skipped: ${result.reason}`);
+        }
+        return;
+      }
+      seat.positionAddress = result.positionAddress;
+      seat.minBinId = result.minBinId;
+      seat.maxBinId = result.maxBinId;
+      seat.solDeployed = result.solDeployed;
+      seat.entrySignature = result.signature;
+    } else {
+      const next = seat.maxBinId + 1;
+      seat.minBinId = next;
+      seat.maxBinId = next;
+      console.log(`[dry-run slide] ${seat.poolName} bin ${next}`);
+    }
+
+    const band = priceBand(price, seat.rangeHalfWidth || 0.06, "bid");
+    seat.entryPrice = price;
+    seat.lastPrice = price;
+    seat.priceLower = band.lower;
+    seat.priceUpper = band.upper;
+    seat.filled = false;
+    seat.touched = false;
+    seat.slides = (seat.slides ?? 0) + 1;
+    seat.slidAt = now;
+    seat.costsUsd += config.txCostUsd * 2;
+    this.state.book.adjusts += 1;
+    this.syncActive();
+    saveState(this.state);
+    console.log(`[slide] ${seat.poolName} bin ${seat.maxBinId} slides=${seat.slides}`);
   }
 
   getSnapshot(): BotSnapshot {

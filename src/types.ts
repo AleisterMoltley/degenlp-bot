@@ -69,6 +69,10 @@ export interface ActivePosition {
   filled?: boolean;
   /** This bid was filled at least once. Stays set after the meme converts back to SOL. */
   touched?: boolean;
+  /** How many times this SOL bid has stepped up under a new price. */
+  slides?: number;
+  /** When the bid last stepped up. The unfilled window counts from here. */
+  slidAt?: number;
   exitReason?: string;
   exitedAt?: number;
 }
