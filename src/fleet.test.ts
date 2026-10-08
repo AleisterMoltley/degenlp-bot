@@ -149,9 +149,17 @@ test("live mode does not open a DAMM seat", () => {
 });
 
 test("a one-bin fill is scratched and a smaller dip is not", () => {
-  const touched = pool({ priceUsd: 0.98 });
+  const inside = planFleet({
+    pools: [pool({ priceUsd: 0.98 })],
+    seats: [seat({ enteredAt: now - 10_000, filled: true })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(inside.closes.length, 0, inside.closes.map((row) => row.reason).join(","));
+  assert.match(inside.holds[0]?.reason ?? "", /round trip/);
+
   const scratch = planFleet({
-    pools: [touched],
+    pools: [pool({ priceUsd: 0.92 })],
     seats: [seat({ enteredAt: now - 10_000, filled: true })],
     deploySol: 0.72,
     now,
@@ -241,6 +249,24 @@ test("a SOL seat in the fee bin stays past the window, and a dip that never retu
   });
   assert.equal(dipped.closes.length, 1);
   assert.match(dipped.closes[0].reason, /skim window closed/);
+
+  const filledDip = planFleet({
+    pools: [pool({ priceUsd: 0.99 })],
+    seats: [
+      seat({
+        filled: true,
+        feesAccruedUsd: 0,
+        enteredAt: now - 9 * 60_000,
+        entryPrice: 1,
+        lastPrice: 0.99,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(filledDip.closes.length, 0, filledDip.closes.map((row) => row.reason).join(","));
+  assert.match(filledDip.holds[0]?.reason ?? "", /round trip/);
 });
 
 test("a dip that stays inside the bid waits for the round trip", () => {
@@ -607,7 +633,7 @@ test("a falling board opens nothing and still scratches a fill", () => {
   assert.match(paused.summary, /board falling/);
 
   const scratch = planFleet({
-    pools: [pool({ priceUsd: 0.98 })],
+    pools: [pool({ priceUsd: 0.92 })],
     seats: [seat({ enteredAt: now - 10_000, filled: true })],
     deploySol: 0.72,
     now,
@@ -976,7 +1002,7 @@ test("a shock pause opens nothing and still scratches a fill", () => {
   assert.match(paused.summary, /shock pause/);
 
   const scratch = planFleet({
-    pools: [pool({ priceUsd: 0.98 })],
+    pools: [pool({ priceUsd: 0.92 })],
     seats: [seat({ enteredAt: now - 10_000, filled: true })],
     deploySol: 0.72,
     now,

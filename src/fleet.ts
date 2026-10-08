@@ -2,7 +2,7 @@ import { chopShapeOk, depthOk } from "./chop.js";
 import { config } from "./config.js";
 import { bankableUsd, collectedFeePct, trailGaveBack } from "./edge.js";
 import { halfWidthFromBins, markIlUsd, oneBinBidIl } from "./pnl.js";
-import { bidLeftBehind, binsAboveEntry, dipThrough, filledShouldSell, MAX_BID_SLIDES, slideInstead } from "./fillwatch.js";
+import { bidLeftBehind, binsAboveEntry, filledShouldSell, MAX_BID_SLIDES, slideInstead } from "./fillwatch.js";
 import { feePerBin, feeRateClears, microChopOk } from "./travel.js";
 import { computeMetrics, planPosition, rankPools, type Metrics } from "./scorer.js";
 import type { ActivePosition, BotDecision, PoolCandidate } from "./types.js";
@@ -477,11 +477,24 @@ export function planFleet(args: {
     // chop, or a break through the bid still leaves. Closing on the first
     // return to SOL would miss the next sell.
     const binStep = seat.binStep || pool.binStep || 80;
-    // Still SOL has nothing to scratch. A fill is sold only once the price
-    // itself is through the bid, not on a one-bin wick the watcher already ignored.
-    if (oneBinSkim && seat.filled === true && dipThrough(price, seat.entryPrice, binStep)) {
-      closes.push({ id: seat.id, action: "exit", reason: "scratched the fill" });
-      continue;
+    // A fill is sold on the way down only once the drop beats the unwind.
+    // Inside that band the market sell locks slippage and skips the fee the
+    // same bin pays when price trades back up through it.
+    if (oneBinSkim && seat.filled === true) {
+      const binsDown = -binsAboveEntry(price, seat.entryPrice, binStep);
+      if (
+        binsDown > 1 &&
+        filledShouldSell({
+          binsUp: binsDown,
+          binStep,
+          unwindBps: UNWIND_BPS,
+          feePct: collectedFeePct(pool),
+          chopAlive: chopStillPays(pool),
+        })
+      ) {
+        closes.push({ id: seat.id, action: "exit", reason: "scratched the fill" });
+        continue;
+      }
     }
     // A filled seat does not slide. Inside the unwind a market sell locks
     // slippage. Past it, the seat stays while the chop can still pay the fee
@@ -536,7 +549,9 @@ export function planFleet(args: {
     }
     if (oneBinSkim && (seat.filled || price < seat.entryPrice)) {
       const held = args.now - seat.enteredAt;
-      if (price < seat.entryPrice && held >= config.fleetMaxLifeMs) {
+      // The clock may withdraw SOL that never filled. A fill leaves only
+      // through the stop above, so the clock cannot market-sell it.
+      if (!seat.filled && price < seat.entryPrice && held >= config.fleetMaxLifeMs) {
         const liveIl = seatIl(seat, pool, price);
         const bankable = bankableUsd(seat.feesAccruedUsd, liveIl, seat.costsUsd, config.txCostUsd);
         closes.push({

@@ -903,10 +903,33 @@ export class DegenLpBot {
         }
         continue;
       }
-      if (cycle === "scratch" && !scratchNow(activeId, seat.minBinId)) {
-        seat.touched = true;
-        console.log(`[fill] ${seat.poolName} waits under bin ${seat.maxBinId} active ${activeId}`);
+      if (cycle === "scratch" && seat.filled !== true) {
+        if (!scratchNow(activeId, seat.minBinId)) {
+          seat.touched = true;
+          console.log(`[fill] ${seat.poolName} waits under bin ${seat.maxBinId} active ${activeId}`);
+          continue;
+        }
+        console.log(`[fill] ${seat.poolName} bid left behind bin ${seat.maxBinId} active ${activeId}`);
+        await this.closeSeat(seat, "bid left behind", "exit");
         continue;
+      }
+      if (cycle === "scratch" && seat.filled === true) {
+        const binsDown = seat.minBinId - activeId;
+        const pool = this.lastPools.find((row) => row.poolAddress === poolAddress);
+        const unwind = Math.max(config.swapBps, 300);
+        if (
+          !filledShouldSell({
+            binsUp: binsDown,
+            binStep: seat.binStep || 80,
+            unwindBps: unwind,
+            feePct: pool ? collectedFeePct(pool) : 0,
+            chopAlive: pool ? chopStillPays(pool) : true,
+          })
+        ) {
+          seat.touched = true;
+          console.log(`[fill] ${seat.poolName} meme waits under bin ${seat.maxBinId} active ${activeId}`);
+          continue;
+        }
       }
       if (cycle === "leave" && seat.filled === true) {
         const binsUp = activeId - seat.maxBinId;
