@@ -2,7 +2,7 @@ import { chopShapeOk, depthOk } from "./chop.js";
 import { config } from "./config.js";
 import { bankableUsd, trailGaveBack } from "./edge.js";
 import { halfWidthFromBins, markIlUsd, oneBinBidIl } from "./pnl.js";
-import { bidLeftBehind, binsAboveEntry, dipThrough, MAX_BID_SLIDES, slideInstead } from "./fillwatch.js";
+import { bidLeftBehind, binsAboveEntry, dipThrough, filledSellClears, MAX_BID_SLIDES, slideInstead } from "./fillwatch.js";
 import { feePerBin, feeRateClears, microChopOk } from "./travel.js";
 import { computeMetrics, planPosition, rankPools, type Metrics } from "./scorer.js";
 import type { ActivePosition, BotDecision, PoolCandidate } from "./types.js";
@@ -475,11 +475,15 @@ export function planFleet(args: {
       closes.push({ id: seat.id, action: "exit", reason: "scratched the fill" });
       continue;
     }
-    // A filled seat that runs does not slide. The meme stays until the price
-    // comes back, and a runner still leaves.
+    // A filled seat does not slide. A pop inside the unwind stays in the bin:
+    // the way back pays the fee, and a market sell would lock the slippage.
+    // Only a move that clears the unwind is sold.
     if (oneBinSkim && seat.filled === true && bidLeftBehind(price, seat.entryPrice, binStep)) {
-      closes.push({ id: seat.id, action: "exit", reason: "bid left behind" });
-      continue;
+      const binsUp = binsAboveEntry(price, seat.entryPrice, binStep);
+      if (filledSellClears(binsUp, binStep, UNWIND_BPS)) {
+        closes.push({ id: seat.id, action: "exit", reason: "bid left behind" });
+        continue;
+      }
     }
     // Still SOL, and the price has left the bin we are in. One step lands in
     // the active bin, which is the bin that pays. A missing tape does not slide

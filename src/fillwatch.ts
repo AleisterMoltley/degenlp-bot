@@ -68,6 +68,17 @@ export function dipThrough(price: number, entry: number, binStep: number): boole
   return price <= entry * (1 - step * 1.5);
 }
 
+/**
+ * A filled bin is worth a market sell only once the move beats the unwind.
+ * Inside that, Jupiter's slippage costs more than the fee the same bin pays
+ * when the price trades back through it.
+ */
+export function filledSellClears(binsUp: number, binStep: number, unwindBps = 300): boolean {
+  if (!(binsUp > 1) || !(binStep > 0) || !(unwindBps > 0)) return false;
+  const step = Math.max(binStep, 1) / 10_000;
+  return binsUp * step > unwindBps / 10_000;
+}
+
 /** The price ran more than one bin above the entry, so this bid is no longer the next sell. */
 export function bidLeftBehind(price: number, entry: number, binStep: number): boolean {
   if (!(price > 0) || !(entry > 0)) return false;

@@ -669,6 +669,41 @@ test("a fill inside the bid waits, and the way back to SOL stays", () => {
   assert.equal(filledUp.slides.length, 0);
   assert.match(filledUp.holds[0]?.reason ?? "", /round trip/);
 
+  const filledNear = planFleet({
+    pools: [pool({ priceUsd: 1.02 })],
+    seats: [
+      seat({
+        filled: true,
+        touched: true,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.02,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(filledNear.closes.length, 0, filledNear.closes.map((row) => row.reason).join(","));
+  assert.match(filledNear.holds[0]?.reason ?? "", /round trip/);
+
+  const filledFar = planFleet({
+    pools: [pool({ priceUsd: 1.05 })],
+    seats: [
+      seat({
+        filled: true,
+        touched: true,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.05,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(filledFar.closes[0]?.reason, "bid left behind");
+
   const insideBin = planFleet({
     pools: [pool({ priceUsd: 1.005 })],
     seats: [

@@ -2,7 +2,7 @@ import { buildCandidates, fetchOriginalOpportunityChecks, fetchTopPumpTokens } f
 import { config } from "./config.js";
 import { bankableUsd, collectedFeePct, depthReadRank } from "./edge.js";
 import { chopFromPrices } from "./chop.js";
-import { bidCycle, MAX_BID_SLIDES, slideIntoActive } from "./fillwatch.js";
+import { bidCycle, filledSellClears, MAX_BID_SLIDES, slideIntoActive } from "./fillwatch.js";
 import { binTapeFromIds, feeRateClears, mintShouldSleep, priceBinId } from "./travel.js";
 import { deploySolFor, equitySol, paceSol } from "./growth.js";
 import { DlmmExecutor, DUST_RAW, enterPositionDryRun } from "./executor.js";
@@ -902,6 +902,14 @@ export class DegenLpBot {
           await this.slideSeat(seat, pool);
         }
         continue;
+      }
+      if (cycle === "leave" && seat.filled === true) {
+        const binsUp = activeId - seat.maxBinId;
+        if (!filledSellClears(binsUp, seat.binStep || 80, Math.max(config.swapBps, 300))) {
+          seat.touched = true;
+          console.log(`[fill] ${seat.poolName} meme waits in bin ${seat.maxBinId} active ${activeId}`);
+          continue;
+        }
       }
       const reason = cycle === "leave" ? "bid left behind" : "scratched the fill";
       console.log(`[fill] ${seat.poolName} ${reason} bin ${seat.maxBinId} active ${activeId}`);

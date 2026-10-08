@@ -51,6 +51,7 @@ test("a dust atom inside the bin does not sleep the mint", () => {
   assert.equal(mintShouldSleep("first meme atom", -126, -125), true);
   assert.equal(mintShouldSleep("first meme atom", undefined, -125), false);
   assert.equal(mintShouldSleep("scratched the fill", -124, -125), true);
+  assert.equal(mintShouldSleep("bid left behind", -122, -124), true);
   assert.equal(mintShouldSleep("banked $0.020 on the skim", -124, -125), false);
   assert.equal(mintShouldSleep("round trip back to SOL", -123, -124), false);
   assert.equal(mintShouldSleep("risk budget", undefined, -125), true);
