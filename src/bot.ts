@@ -2,7 +2,7 @@ import { buildCandidates, fetchOriginalOpportunityChecks, fetchTopPumpTokens } f
 import { config } from "./config.js";
 import { bankableUsd, collectedFeePct, depthReadRank } from "./edge.js";
 import { chopFromPrices } from "./chop.js";
-import { bidCycle, filledShouldSell, MAX_BID_SLIDES, slideIntoActive } from "./fillwatch.js";
+import { bidCycle, filledShouldSell, MAX_BID_SLIDES, scratchNow, slideIntoActive } from "./fillwatch.js";
 import { binTapeFromIds, feeRateClears, mintShouldSleep, priceBinId } from "./travel.js";
 import { deploySolFor, equitySol, paceSol } from "./growth.js";
 import { DlmmExecutor, DUST_RAW, enterPositionDryRun } from "./executor.js";
@@ -903,6 +903,11 @@ export class DegenLpBot {
         }
         continue;
       }
+      if (cycle === "scratch" && !scratchNow(activeId, seat.minBinId)) {
+        seat.touched = true;
+        console.log(`[fill] ${seat.poolName} waits under bin ${seat.maxBinId} active ${activeId}`);
+        continue;
+      }
       if (cycle === "leave" && seat.filled === true) {
         const binsUp = activeId - seat.maxBinId;
         const pool = this.lastPools.find((row) => row.poolAddress === poolAddress);
@@ -1218,23 +1223,16 @@ export class DegenLpBot {
 
   private async reconcileActive() {
     if (!this.executor || !this.state.seats.length) return;
-    const gone: ActivePosition[] = [];
-    for (const seat of this.state.seats) {
+    for (const seat of [...this.state.seats]) {
+      // A close or a slide already owns this seat. Pushing it again wrote the same loss twice.
+      if (this.exitFlight.has(seat.id) || this.slideFlight.has(seat.id)) continue;
       const exists = await this.executor.positionExists(seat.positionAddress);
-      if (!exists) gone.push(seat);
+      if (exists) continue;
+      if (this.exitFlight.has(seat.id) || this.slideFlight.has(seat.id)) continue;
+      if (!this.state.seats.some((row) => row.id === seat.id)) continue;
+      console.log(`[reconcile] ${seat.poolName} gone on-chain, closing once`);
+      await this.closeSeat(seat, "Position not found on-chain - already closed", "exit", true);
     }
-    if (!gone.length) return;
-    for (const active of gone) {
-      console.log(`[reconcile] ${active.poolName} gone on-chain, clearing state`);
-      active.status = "closed";
-      active.exitReason = active.exitReason || "Position not found on-chain - already closed";
-      active.exitedAt = active.exitedAt || Date.now();
-      this.state.closed.push(active);
-      this.state.seats = this.state.seats.filter((seat) => seat.id !== active.id);
-      await this.telemetryExit(active, "Position not found on-chain - already closed", `reconciliation_${active.positionAddress}_${Date.now()}`);
-    }
-    this.syncActive();
-    saveState(this.state);
   }
 
   private async telemetryEntry(pos: ActivePosition) {

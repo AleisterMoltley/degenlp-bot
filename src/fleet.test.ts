@@ -152,12 +152,20 @@ test("a one-bin fill is scratched and a smaller dip is not", () => {
   const touched = pool({ priceUsd: 0.98 });
   const scratch = planFleet({
     pools: [touched],
-    seats: [seat({ enteredAt: now - 10_000 })],
+    seats: [seat({ enteredAt: now - 10_000, filled: true })],
     deploySol: 0.72,
     now,
   });
   assert.equal(scratch.closes.length, 1);
   assert.match(scratch.closes[0].reason, /scratched the fill/);
+
+  const unfilled = planFleet({
+    pools: [pool({ priceUsd: 0.98 })],
+    seats: [seat({ enteredAt: now - 10_000, filled: false })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(unfilled.closes.length, 0, unfilled.closes.map((row) => row.reason).join(","));
 
   const dip = planFleet({
     pools: [pool({ priceUsd: 0.995 })],
@@ -600,7 +608,7 @@ test("a falling board opens nothing and still scratches a fill", () => {
 
   const scratch = planFleet({
     pools: [pool({ priceUsd: 0.98 })],
-    seats: [seat({ enteredAt: now - 10_000 })],
+    seats: [seat({ enteredAt: now - 10_000, filled: true })],
     deploySol: 0.72,
     now,
     boardDown: true,
@@ -969,7 +977,7 @@ test("a shock pause opens nothing and still scratches a fill", () => {
 
   const scratch = planFleet({
     pools: [pool({ priceUsd: 0.98 })],
-    seats: [seat({ enteredAt: now - 10_000 })],
+    seats: [seat({ enteredAt: now - 10_000, filled: true })],
     deploySol: 0.72,
     now,
     freezeOpens: true,
@@ -1079,7 +1087,12 @@ test("downwardMove is the drop from the window peak", () => {
 });
 
 test("an open pool is not entered twice", () => {
-  const other = paying({ poolAddress: "pool-b", poolName: "NEXT-SOL", tokenSymbol: "NEXT" });
+  const other = paying({
+    poolAddress: "pool-b",
+    tokenMint: "next",
+    poolName: "NEXT-SOL",
+    tokenSymbol: "NEXT",
+  });
   const plan = planFleet({
     pools: [pool(), other],
     seats: [seat({ poolAddress: "pool-a" })],

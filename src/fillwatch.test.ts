@@ -10,6 +10,7 @@ import {
   bidTouched,
   binsAboveEntry,
   dipThrough,
+  scratchNow,
   slideInstead,
   slideIntoActive,
   LBPAIR_ACTIVE_ID_OFFSET,
@@ -54,6 +55,8 @@ test("a SOL deposit earns in the active bin, chases one bin up, and scratches th
   assert.equal(bidCycle(-125, -124, -124, false), "scratch");
   assert.equal(dipThrough(0.992, 1, 100), false);
   assert.equal(dipThrough(0.98, 1, 100), true);
+  assert.equal(scratchNow(-125, -124), false);
+  assert.equal(scratchNow(-126, -124), true);
   assert.equal(bidLeftBehind(1.01, 1, 100), false);
   assert.equal(bidLeftBehind(1.02, 1, 100), true);
   assert.equal(filledSellClears(2, 100, 300), false);

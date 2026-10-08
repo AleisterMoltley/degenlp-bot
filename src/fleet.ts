@@ -74,7 +74,7 @@ export interface FleetPlan {
   summary: string;
 }
 
-const COOL_RE = /divergence|edge gone|left the range|left the fee list|risk budget|scratch|skim window closed|tape turned/;
+const COOL_RE = /divergence|edge gone|left the range|left the fee list|risk budget|scratch|skim window closed|tape turned|bid left behind/;
 
 export function coolsOff(reason: string): boolean {
   return COOL_RE.test(reason);
@@ -477,7 +477,9 @@ export function planFleet(args: {
     // chop, or a break through the bid still leaves. Closing on the first
     // return to SOL would miss the next sell.
     const binStep = seat.binStep || pool.binStep || 80;
-    if (oneBinSkim && dipThrough(price, seat.entryPrice, binStep)) {
+    // Still SOL has nothing to scratch. A fill is sold only once the price
+    // itself is through the bid, not on a one-bin wick the watcher already ignored.
+    if (oneBinSkim && seat.filled === true && dipThrough(price, seat.entryPrice, binStep)) {
       closes.push({ id: seat.id, action: "exit", reason: "scratched the fill" });
       continue;
     }

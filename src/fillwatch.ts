@@ -61,6 +61,15 @@ export function bidCycle(
   return seenFill ? "hold" : "earn";
 }
 
+/**
+ * One bin under the bid is still the chop. Selling there pays the unwind on a
+ * wick. Two bins under is the break.
+ */
+export function scratchNow(activeId: number, minBinId: number): boolean {
+  if (!Number.isInteger(activeId) || !Number.isInteger(minBinId)) return false;
+  return minBinId - activeId >= 2;
+}
+
 /** Price stand-in when the scan has no bin id. Past the bid, short of a clean two-bin break. */
 export function dipThrough(price: number, entry: number, binStep: number): boolean {
   if (!(price > 0) || !(entry > 0)) return false;
