@@ -33,8 +33,12 @@ export function emptyBook(): Book {
   };
 }
 
-/** Bump this to clear the persisted book once more. A matching epoch is left alone. */
-export const PNL_EPOCH = 1;
+/**
+ * Bump this to clear the persisted book once more. A matching epoch is left alone.
+ * 1 cleared leftover sells booked as closes.
+ * 2 clears a one-bin scratch marked with the wide-bid divergence model.
+ */
+export const PNL_EPOCH = 2;
 
 const defaultState = (): BotState => ({
   positionSeq: 0,
@@ -45,8 +49,8 @@ const defaultState = (): BotState => ({
 });
 
 /**
- * Failed leftover sells were booked as closes. When armed, drop that book once.
- * Open seats and the wallet file stay. A later restart keeps whatever the desk earns after.
+ * When armed, drop a stale book once. Open seats and the wallet file stay.
+ * A later restart keeps whatever the desk earns after the clear.
  */
 export function applyPnlEpoch(state: BotState, armed: boolean, epoch = PNL_EPOCH): boolean {
   if (!armed || state.pnlEpoch === epoch) return false;

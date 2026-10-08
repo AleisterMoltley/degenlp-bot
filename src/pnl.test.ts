@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { accrueFees, halfWidthFromBins, markIlUsd, priceBand } from "./pnl.js";
+import { accrueFees, halfWidthFromBins, markIlUsd, oneBinBidIl, priceBand } from "./pnl.js";
 
 test("bin width stays inside a usable band", () => {
   const width = halfWidthFromBins(100, 13);
@@ -41,6 +41,23 @@ test("a bid that is still SOL has no divergence loss when price rises", () => {
     side: "bid",
   });
   assert.equal(il, 0);
+});
+
+test("a one-bin bid books the fill drop and nothing while it is still SOL", () => {
+  assert.equal(oneBinBidIl({ deployUsd: 24, entryPrice: 1, price: 0.9, filled: false }), 0);
+  assert.equal(oneBinBidIl({ deployUsd: 24, entryPrice: 1, price: 1.04, filled: true }), 0);
+  const oneBin = oneBinBidIl({ deployUsd: 24, entryPrice: 1, price: 0.98, filled: true });
+  assert.ok(Math.abs(oneBin - 0.48) < 1e-9);
+  const wide = markIlUsd({
+    deployUsd: 24,
+    entryPrice: 1,
+    price: 0.98,
+    lower: 0.99,
+    upper: 1.002,
+    side: "bid",
+  });
+  assert.ok(wide > 8);
+  assert.ok(oneBin < 1);
 });
 
 test("a filled bid books a loss once price leaves the bottom", () => {

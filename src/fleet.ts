@@ -1,7 +1,7 @@
 import { chopShapeOk, depthOk } from "./chop.js";
 import { config } from "./config.js";
 import { bankableUsd, trailGaveBack } from "./edge.js";
-import { halfWidthFromBins, markIlUsd } from "./pnl.js";
+import { halfWidthFromBins, markIlUsd, oneBinBidIl } from "./pnl.js";
 import { bidLeftBehind, binsAboveEntry, dipThrough, MAX_BID_SLIDES, slideInstead } from "./fillwatch.js";
 import { feePerBin, feeRateClears, microChopOk } from "./travel.js";
 import { computeMetrics, planPosition, rankPools, type Metrics } from "./scorer.js";
@@ -382,6 +382,14 @@ function seatIl(seat: ActivePosition, pool: PoolCandidate | undefined, price: nu
   const sol = pool?.solPrice || seat.solPrice || 0;
   const deployUsd = seat.solDeployed * sol;
   if (deployUsd <= 0) return seat.ilUsd;
+  if (isSkim(seat) && seat.side === "bid" && seat.minBinId === seat.maxBinId) {
+    return oneBinBidIl({
+      deployUsd,
+      entryPrice: seat.entryPrice,
+      price,
+      filled: seat.filled === true,
+    });
+  }
   return markIlUsd({
     deployUsd,
     entryPrice: seat.entryPrice,

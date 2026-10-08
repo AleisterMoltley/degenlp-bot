@@ -56,6 +56,24 @@ export function accrueFees(args: {
   return (args.fees30mUsd / 30) * args.elapsedMin * feeShare(args);
 }
 
+/**
+ * Divergence of a one-bin SOL bid. Still SOL is not a loss: the price print
+ * does not convert the seat. A fill holds the meme, so the loss is the drop
+ * from the fill price, and it cannot exceed the seat. The wide-bid slice
+ * (about 35% once price reaches the bottom of the band) does not apply.
+ */
+export function oneBinBidIl(args: {
+  deployUsd: number;
+  entryPrice: number;
+  price: number;
+  filled: boolean;
+}): number {
+  if (!(args.deployUsd > 0) || !args.filled) return 0;
+  if (!(args.entryPrice > 0) || !(args.price > 0) || args.price >= args.entryPrice) return 0;
+  const drop = (args.entryPrice - args.price) / args.entryPrice;
+  return args.deployUsd * Math.min(1, Math.max(0, drop));
+}
+
 /** Mark-to-market divergence versus the deposit. Not a cumulative sum. */
 export function markIlUsd(args: {
   deployUsd: number;

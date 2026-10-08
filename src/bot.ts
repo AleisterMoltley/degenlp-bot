@@ -9,7 +9,7 @@ import { DlmmExecutor, DUST_RAW, enterPositionDryRun } from "./executor.js";
 import { loadWalletKeypair, saveWalletSecret } from "./wallet.js";
 import { fetchMeteoraCandidates } from "./meteora.js";
 import { mergeWatched, watchedMemePools } from "./watched.js";
-import { accrueFees, entryCostUsd, markIlUsd, priceBand } from "./pnl.js";
+import { accrueFees, entryCostUsd, markIlUsd, oneBinBidIl, priceBand } from "./pnl.js";
 import { hydratePosition } from "./position.js";
 import { measureRpcLatency, ProofNetworkTelemetry } from "./proofnetwork.js";
 import { chopConfirmed, planFleet, coolsOff, downwardMove, type FleetOpen, type FleetPlan } from "./fleet.js";
@@ -294,14 +294,21 @@ export class DegenLpBot {
           rangeHalfWidth: pos.rangeHalfWidth,
         });
       }
-      pos.ilUsd = markIlUsd({
-        deployUsd,
-        entryPrice: pos.entryPrice,
-        price,
-        lower: pos.priceLower,
-        upper: pos.priceUpper,
-        side: pos.side,
-      });
+      pos.ilUsd = oneBinBid
+        ? oneBinBidIl({
+            deployUsd,
+            entryPrice: pos.entryPrice,
+            price,
+            filled: pos.filled === true,
+          })
+        : markIlUsd({
+            deployUsd,
+            entryPrice: pos.entryPrice,
+            price,
+            lower: pos.priceLower,
+            upper: pos.priceUpper,
+            side: pos.side,
+          });
       pos.solPrice = sol;
     }
     const net = bankableUsd(pos.feesAccruedUsd, pos.ilUsd, pos.costsUsd, config.txCostUsd);
