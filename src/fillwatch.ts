@@ -140,8 +140,8 @@ export function slideInstead(binsUp: number, filled: boolean, slides: number, ch
 }
 
 /**
- * The chain active bin is exactly one above a SOL bid.
- * The next deposit is that active bin. Two bins above is a runner and does not slide.
+ * The chain active bin is exactly one step from a SOL bid, up or down.
+ * That bin is the one that pays. Two steps either way is a runner.
  */
 export function slideIntoActive(
   activeId: number,
@@ -152,5 +152,6 @@ export function slideIntoActive(
 ): boolean {
   if (filled || !chopConfirmed || slides >= MAX_BID_SLIDES) return false;
   if (!Number.isInteger(activeId) || !Number.isInteger(maxBinId)) return false;
-  return activeId === maxBinId + 1;
+  const delta = activeId - maxBinId;
+  return delta === 1 || delta === -1;
 }

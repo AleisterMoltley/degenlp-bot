@@ -79,7 +79,9 @@ test("a SOL deposit earns in the active bin, chases one bin up, and scratches th
   assert.equal(slideInstead(2, false, 3, true), false);
   assert.equal(slideInstead(4, false, 0, true), false);
   assert.equal(slideIntoActive(-123, -124, false, 0, true), true);
+  assert.equal(slideIntoActive(-125, -124, false, 0, true), true);
   assert.equal(slideIntoActive(-122, -124, false, 0, true), false);
+  assert.equal(slideIntoActive(-126, -124, false, 0, true), false);
   assert.equal(slideIntoActive(-123, -124, true, 0, true), false);
 });
 

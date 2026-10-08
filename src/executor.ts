@@ -259,7 +259,8 @@ export class DlmmExecutor {
   }
 
   /**
-   * Move a one-bin SOL bid up one bin. Refuses while the meme is still in the position.
+   * Move a one-bin SOL bid onto the active bin, one step up or down.
+   * Refuses while the meme is still in the position.
    * If the remove lands and the new deposit does not, the seat is flat and the caller must not exit again.
    */
   async slideSolBid(position: ActivePosition): Promise<SlideResult> {
@@ -270,11 +271,12 @@ export class DlmmExecutor {
     const poolPk = new PublicKey(position.poolAddress);
     const dlmm = await DLMM.create(this.connection, poolPk);
     const active = await dlmm.getActiveBin();
-    // One step, and only when that step is the active bin. Landing one short
-    // puts the SOL back where intra-bin sells do not pay it. A two-bin jump is a runner.
+    // One step onto the active bin, up or down. A bin that is not active does
+    // not get the swap. Two steps either way is a runner.
     const next = active.binId;
-    if (next <= position.maxBinId) return { ok: false, flat: false, reason: "price came back" };
-    if (next !== position.maxBinId + 1) return { ok: false, flat: false, reason: "runner" };
+    const delta = next - position.maxBinId;
+    if (delta === 0) return { ok: false, flat: false, reason: "price came back" };
+    if (delta !== 1 && delta !== -1) return { ok: false, flat: false, reason: "runner" };
 
     const tokenX = dlmm.tokenX.publicKey.toBase58();
     const tokenY = dlmm.tokenY.publicKey.toBase58();

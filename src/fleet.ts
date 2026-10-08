@@ -519,13 +519,28 @@ export function planFleet(args: {
     // and does not evict. A dead chop, a third slide, or a runner does.
     if (oneBinSkim && seat.filled !== true) {
       const binsUp = binsAboveEntry(price, seat.entryPrice, binStep);
+      const slidesUsed = seat.slides ?? 0;
       if (binsUp >= 1 - 1e-6) {
-        const slidesUsed = seat.slides ?? 0;
         if (slideInstead(binsUp, false, slidesUsed, chopConfirmed(pool))) {
           slides.push({ id: seat.id, reason: "slide the bid into the active bin" });
           continue;
         }
         if (binsUp > 2.5 || slidesUsed >= MAX_BID_SLIDES || !chopStillPays(pool)) {
+          closes.push({ id: seat.id, action: "exit", reason: "bid left behind" });
+          continue;
+        }
+        holds.push({ id: seat.id, reason: "waiting for the bin" });
+        continue;
+      }
+      // SOL sitting above the active bin earns nothing. One step down lands
+      // in the bin the next sell pays. A dead chop does not chase the dip.
+      const binsDown = -binsUp;
+      if (binsDown >= 1 - 1e-6) {
+        if (slideInstead(binsDown, false, slidesUsed, chopConfirmed(pool))) {
+          slides.push({ id: seat.id, reason: "slide the bid into the active bin" });
+          continue;
+        }
+        if (binsDown > 2.5 || slidesUsed >= MAX_BID_SLIDES || !chopStillPays(pool)) {
           closes.push({ id: seat.id, action: "exit", reason: "bid left behind" });
           continue;
         }

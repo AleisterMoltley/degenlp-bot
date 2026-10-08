@@ -174,6 +174,7 @@ test("a one-bin fill is scratched and a smaller dip is not", () => {
     now,
   });
   assert.equal(unfilled.closes.length, 0, unfilled.closes.map((row) => row.reason).join(","));
+  assert.equal(unfilled.slides.length, 1);
 
   const dip = planFleet({
     pools: [pool({ priceUsd: 0.995 })],
@@ -241,14 +242,32 @@ test("a SOL seat in the fee bin stays past the window, and a dip that never retu
   assert.equal(earning.closes.length, 0, earning.closes.map((row) => row.reason).join(","));
   assert.match(earning.holds[0]?.reason ?? "", /earning/);
 
-  const dipped = planFleet({
+  const follow = planFleet({
     pools: [pool({ priceUsd: 0.99 })],
     seats: [seat({ feesAccruedUsd: 0, enteredAt: now - 9 * 60_000, entryPrice: 1, lastPrice: 0.99, binStep: 100 })],
     deploySol: 0.72,
     now,
   });
-  assert.equal(dipped.closes.length, 1);
-  assert.match(dipped.closes[0].reason, /skim window closed/);
+  assert.equal(follow.closes.length, 0, follow.closes.map((row) => row.reason).join(","));
+  assert.equal(follow.slides.length, 1);
+
+  const deadDip = planFleet({
+    pools: [pool({ priceUsd: 0.99, chopCrossings: 0, chopNetBins: 6 })],
+    seats: [seat({ feesAccruedUsd: 0, enteredAt: now - 9 * 60_000, entryPrice: 1, lastPrice: 0.99, binStep: 100 })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(deadDip.slides.length, 0);
+  assert.equal(deadDip.closes[0]?.reason, "bid left behind");
+
+  const shy = planFleet({
+    pools: [pool({ priceUsd: 0.995 })],
+    seats: [seat({ feesAccruedUsd: 0, enteredAt: now - 9 * 60_000, entryPrice: 1, lastPrice: 0.995, binStep: 100 })],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(shy.closes.length, 1);
+  assert.match(shy.closes[0].reason, /skim window closed/);
 
   const filledDip = planFleet({
     pools: [pool({ priceUsd: 0.99 })],

@@ -904,6 +904,12 @@ export class DegenLpBot {
         continue;
       }
       if (cycle === "scratch" && seat.filled !== true) {
+        const pool = this.lastPools.find((row) => row.poolAddress === poolAddress);
+        const confirmed = pool ? chopConfirmed(pool) : false;
+        if (pool && slideIntoActive(activeId, seat.maxBinId, false, seat.slides ?? 0, confirmed)) {
+          await this.slideSeat(seat, pool);
+          continue;
+        }
         if (!scratchNow(activeId, seat.minBinId)) {
           seat.touched = true;
           console.log(`[fill] ${seat.poolName} waits under bin ${seat.maxBinId} active ${activeId}`);
@@ -1034,7 +1040,9 @@ export class DegenLpBot {
       seat.solDeployed = result.solDeployed;
       seat.entrySignature = result.signature;
     } else {
-      const next = seat.maxBinId + 1;
+      const active = this.lastActiveId.get(seat.poolAddress);
+      const down = active != null ? active < seat.maxBinId : price < seat.entryPrice;
+      const next = seat.maxBinId + (down ? -1 : 1);
       seat.minBinId = next;
       seat.maxBinId = next;
       console.log(`[dry-run slide] ${seat.poolName} bin ${next}`);
