@@ -5,6 +5,7 @@ import {
   activeIdsFromAccounts,
   bidCycle,
   filledSellClears,
+  filledShouldSell,
   bidLeftBehind,
   bidTouched,
   binsAboveEntry,
@@ -58,6 +59,13 @@ test("a SOL deposit earns in the active bin, chases one bin up, and scratches th
   assert.equal(filledSellClears(2, 100, 300), false);
   assert.equal(filledSellClears(4, 100, 300), true);
   assert.equal(filledSellClears(2, 250, 300), true);
+  // 4% up does not clear a 3% unwind plus 8% * 0.9. 12% does.
+  assert.equal(filledSellClears(4, 100, 300, 0.08), false);
+  assert.equal(filledSellClears(12, 100, 300, 0.08), true);
+  assert.equal(filledShouldSell({ binsUp: 2, binStep: 100, unwindBps: 300, feePct: 0.08, chopAlive: false }), false);
+  assert.equal(filledShouldSell({ binsUp: 4, binStep: 100, unwindBps: 300, feePct: 0.08, chopAlive: true }), false);
+  assert.equal(filledShouldSell({ binsUp: 4, binStep: 100, unwindBps: 300, feePct: 0.08, chopAlive: false }), true);
+  assert.equal(filledShouldSell({ binsUp: 12, binStep: 100, unwindBps: 300, feePct: 0.08, chopAlive: true }), true);
   assert.ok(Math.abs(binsAboveEntry(1.01, 1, 100) - 1) < 1e-9);
   assert.ok(Math.abs(binsAboveEntry(1.02, 1, 100) - 2) < 1e-9);
   assert.equal(slideInstead(1, false, 0, true), true);

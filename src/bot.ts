@@ -2,7 +2,7 @@ import { buildCandidates, fetchOriginalOpportunityChecks, fetchTopPumpTokens } f
 import { config } from "./config.js";
 import { bankableUsd, collectedFeePct, depthReadRank } from "./edge.js";
 import { chopFromPrices } from "./chop.js";
-import { bidCycle, filledSellClears, MAX_BID_SLIDES, slideIntoActive } from "./fillwatch.js";
+import { bidCycle, filledShouldSell, MAX_BID_SLIDES, slideIntoActive } from "./fillwatch.js";
 import { binTapeFromIds, feeRateClears, mintShouldSleep, priceBinId } from "./travel.js";
 import { deploySolFor, equitySol, paceSol } from "./growth.js";
 import { DlmmExecutor, DUST_RAW, enterPositionDryRun } from "./executor.js";
@@ -12,7 +12,7 @@ import { mergeWatched, watchedMemePools } from "./watched.js";
 import { accrueFees, entryCostUsd, markIlUsd, oneBinBidIl, priceBand } from "./pnl.js";
 import { hydratePosition } from "./position.js";
 import { measureRpcLatency, ProofNetworkTelemetry } from "./proofnetwork.js";
-import { chopConfirmed, planFleet, coolsOff, downwardMove, type FleetOpen, type FleetPlan } from "./fleet.js";
+import { chopConfirmed, chopStillPays, planFleet, coolsOff, downwardMove, type FleetOpen, type FleetPlan } from "./fleet.js";
 import { decide, planToCheck, type Plan } from "./scorer.js";
 import { ensureGrowth, loadState, saveState, type BotState, type GrowthLedger } from "./state.js";
 import type { ActivePosition, BotDecision, OpportunityCheck, PoolCandidate } from "./types.js";
@@ -905,7 +905,17 @@ export class DegenLpBot {
       }
       if (cycle === "leave" && seat.filled === true) {
         const binsUp = activeId - seat.maxBinId;
-        if (!filledSellClears(binsUp, seat.binStep || 80, Math.max(config.swapBps, 300))) {
+        const pool = this.lastPools.find((row) => row.poolAddress === poolAddress);
+        const unwind = Math.max(config.swapBps, 300);
+        if (
+          !filledShouldSell({
+            binsUp,
+            binStep: seat.binStep || 80,
+            unwindBps: unwind,
+            feePct: pool ? collectedFeePct(pool) : 0,
+            chopAlive: pool ? chopStillPays(pool) : true,
+          })
+        ) {
           seat.touched = true;
           console.log(`[fill] ${seat.poolName} meme waits in bin ${seat.maxBinId} active ${activeId}`);
           continue;

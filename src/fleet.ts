@@ -1,8 +1,8 @@
 import { chopShapeOk, depthOk } from "./chop.js";
 import { config } from "./config.js";
-import { bankableUsd, trailGaveBack } from "./edge.js";
+import { bankableUsd, collectedFeePct, trailGaveBack } from "./edge.js";
 import { halfWidthFromBins, markIlUsd, oneBinBidIl } from "./pnl.js";
-import { bidLeftBehind, binsAboveEntry, dipThrough, filledSellClears, MAX_BID_SLIDES, slideInstead } from "./fillwatch.js";
+import { bidLeftBehind, binsAboveEntry, dipThrough, filledShouldSell, MAX_BID_SLIDES, slideInstead } from "./fillwatch.js";
 import { feePerBin, feeRateClears, microChopOk } from "./travel.js";
 import { computeMetrics, planPosition, rankPools, type Metrics } from "./scorer.js";
 import type { ActivePosition, BotDecision, PoolCandidate } from "./types.js";
@@ -184,15 +184,21 @@ const SNIPE_BINS = 1;
 
 const UNWIND_BPS = Math.max(config.swapBps, 300);
 
-function chopBlocks(pool: PoolCandidate): boolean {
+function chopBlocks(pool: PoolCandidate, kind: "skim" | "core"): boolean {
   if (pool.venue !== "dlmm") return false;
   const shape = chopShapeOk({
     samples: pool.chopSamples ?? 0,
     crossings: pool.chopCrossings ?? 0,
     netBins: pool.chopNetBins ?? Number.POSITIVE_INFINITY,
   });
-  const depth = depthOk(pool.volume30mUsd / 30, pool.binSolUsd);
-  return !shape || !depth;
+  if (!shape) return true;
+  // No bin read means the fill quote would invent the share. Both seats stay out.
+  if (!(pool.binSolUsd != null && pool.binSolUsd > 0)) return true;
+  // A one-bin skim is paid by flow through the bin. One minute of volume above
+  // the bin's SOL is that flow, as long as the tape is still flat. A wider
+  // core quote still refuses a bin the next minute can sweep.
+  if (kind === "skim") return false;
+  return !depthOk(pool.volume30mUsd / 30, pool.binSolUsd);
 }
 
 function geometryBlocks(pool: PoolCandidate): boolean {
@@ -211,8 +217,8 @@ function travelBlocks(pool: PoolCandidate): boolean {
   });
 }
 
-function entryBlocked(pool: PoolCandidate): boolean {
-  return geometryBlocks(pool) || travelBlocks(pool) || chopBlocks(pool);
+function entryBlocked(pool: PoolCandidate, kind: "skim" | "core"): boolean {
+  return geometryBlocks(pool) || travelBlocks(pool) || chopBlocks(pool, kind);
 }
 
 function skimQuote(
@@ -298,7 +304,7 @@ function pickSkims(
       !blocked.has(pool.poolAddress) &&
       !seatedMints.has(pool.tokenMint) &&
       !tapeBlocksEntry(pool, moves) &&
-      !entryBlocked(pool),
+      !entryBlocked(pool, "skim"),
   );
   const cap = floorSol(Math.min(ceiling, budget));
   if (budget < config.fleetMinSlot || cap < config.fleetMinSlot || !ranked.length) return [];
@@ -349,7 +355,7 @@ function scaleSeats(
     const hold = holds.find((row) => row.id === seat.id);
     if (hold?.reason !== "earning the bin" && hold?.reason !== "bid is SOL again") continue;
     const pool = pools.find((row) => row.poolAddress === seat.poolAddress);
-    if (!pool || tapeBlocksEntry(pool, moves) || entryBlocked(pool)) continue;
+    if (!pool || tapeBlocksEntry(pool, moves) || entryBlocked(pool, "skim")) continue;
     const room = floorSol(Math.min(seat.solDeployed + freeSol, ceiling));
     if (room < seat.solDeployed + minAdd - 1e-9) continue;
     const best = bestSkim(pool, room, moves);
@@ -401,7 +407,7 @@ function seatIl(seat: ActivePosition, pool: PoolCandidate | undefined, price: nu
 }
 
 /** A mature tape that stopped reversing is a dead chop. A short tape is not. */
-function chopStillPays(pool: PoolCandidate): boolean {
+export function chopStillPays(pool: PoolCandidate): boolean {
   const priceReady = (pool.chopSamples ?? 0) >= 4;
   const priceOk =
     !priceReady ||
@@ -475,12 +481,20 @@ export function planFleet(args: {
       closes.push({ id: seat.id, action: "exit", reason: "scratched the fill" });
       continue;
     }
-    // A filled seat does not slide. A pop inside the unwind stays in the bin:
-    // the way back pays the fee, and a market sell would lock the slippage.
-    // Only a move that clears the unwind is sold.
+    // A filled seat does not slide. Inside the unwind a market sell locks
+    // slippage. Past it, the seat stays while the chop can still pay the fee
+    // on the way back, and leaves once the move beats that fee or the chop dies.
     if (oneBinSkim && seat.filled === true && bidLeftBehind(price, seat.entryPrice, binStep)) {
       const binsUp = binsAboveEntry(price, seat.entryPrice, binStep);
-      if (filledSellClears(binsUp, binStep, UNWIND_BPS)) {
+      if (
+        filledShouldSell({
+          binsUp,
+          binStep,
+          unwindBps: UNWIND_BPS,
+          feePct: collectedFeePct(pool),
+          chopAlive: chopStillPays(pool),
+        })
+      ) {
         closes.push({ id: seat.id, action: "exit", reason: "bid left behind" });
         continue;
       }
@@ -672,7 +686,7 @@ export function planFleet(args: {
       );
       const best = ranked
         .filter(
-          (row) => row.metrics.metThreshold && allow(row.pool) && row.pool.side !== "curve" && !entryBlocked(row.pool),
+          (row) => row.metrics.metThreshold && allow(row.pool) && row.pool.side !== "curve" && !entryBlocked(row.pool, "core"),
         )
         .sort((a, b) => feePerBin(b.pool) - feePerBin(a.pool) || b.metrics.edgeUsd - a.metrics.edgeUsd)[0];
       if (best) {
@@ -718,7 +732,7 @@ export function planFleet(args: {
       const blockedByTape = tapeBlocksEntry(pool, args.moves);
       const blockedByGeometry = !blockedByTape && geometryBlocks(pool);
       const blockedByTravel = !blockedByTape && !blockedByGeometry && travelBlocks(pool);
-      const blockedByChop = !blockedByTape && !blockedByGeometry && !blockedByTravel && chopBlocks(pool);
+      const blockedByChop = !blockedByTape && !blockedByGeometry && !blockedByTravel && chopBlocks(pool, "skim");
       const blockedByGate = blockedByTape || blockedByGeometry || blockedByTravel || blockedByChop;
       const strategy = blockedByTape
         ? "tape"

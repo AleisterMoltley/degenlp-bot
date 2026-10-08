@@ -496,6 +496,20 @@ test("a deep bin stays shut and a faster bin is seated first", () => {
   assert.equal(plan.opens[0]?.pool.poolAddress, "fast");
 });
 
+test("a flat bin that turns over faster than its SOL is a skim", () => {
+  const hot = paying({
+    poolAddress: "hot",
+    tokenMint: "hot",
+    tokenSymbol: "HOT",
+    poolName: "HOT-SOL",
+    binSolUsd: 500,
+  });
+  const plan = planFleet({ pools: [hot], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.equal(plan.opens.length, 1, plan.summary);
+  assert.equal(plan.opens[0]?.strategy, "skim");
+  assert.equal(plan.opens[0]?.pool.poolAddress, "hot");
+});
+
 test("a flat active bin is a seat and a one-way step is not", () => {
   const flat = paying({
     poolAddress: "flat-bin",
@@ -687,7 +701,7 @@ test("a fill inside the bid waits, and the way back to SOL stays", () => {
   assert.equal(filledNear.closes.length, 0, filledNear.closes.map((row) => row.reason).join(","));
   assert.match(filledNear.holds[0]?.reason ?? "", /round trip/);
 
-  const filledFar = planFleet({
+  const filledMid = planFleet({
     pools: [pool({ priceUsd: 1.05 })],
     seats: [
       seat({
@@ -696,6 +710,41 @@ test("a fill inside the bid waits, and the way back to SOL stays", () => {
         enteredAt: now - 10_000,
         entryPrice: 1,
         lastPrice: 1.05,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(filledMid.closes.length, 0, filledMid.closes.map((row) => row.reason).join(","));
+  assert.match(filledMid.holds[0]?.reason ?? "", /round trip/);
+
+  const filledDead = planFleet({
+    pools: [pool({ priceUsd: 1.05, chopCrossings: 0, chopNetBins: 6 })],
+    seats: [
+      seat({
+        filled: true,
+        touched: true,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.05,
+        binStep: 100,
+      }),
+    ],
+    deploySol: 0.72,
+    now,
+  });
+  assert.equal(filledDead.closes[0]?.reason, "bid left behind");
+
+  const filledFar = planFleet({
+    pools: [pool({ priceUsd: 1.08 })],
+    seats: [
+      seat({
+        filled: true,
+        touched: true,
+        enteredAt: now - 10_000,
+        entryPrice: 1,
+        lastPrice: 1.08,
         binStep: 100,
       }),
     ],

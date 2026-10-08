@@ -69,14 +69,39 @@ export function dipThrough(price: number, entry: number, binStep: number): boole
 }
 
 /**
- * A filled bin is worth a market sell only once the move beats the unwind.
- * Inside that, Jupiter's slippage costs more than the fee the same bin pays
- * when the price trades back through it.
+ * A filled bin is worth a market sell only once the move beats the unwind
+ * plus the fee the reverse swap would pay in the same bin. Standard DLMM
+ * pays the LP 90% of a fee that itself caps at 10%. Inside the unwind,
+ * the sell locks slippage and skips that fee.
  */
-export function filledSellClears(binsUp: number, binStep: number, unwindBps = 300): boolean {
+export function filledSellClears(
+  binsUp: number,
+  binStep: number,
+  unwindBps = 300,
+  feePct = 0,
+): boolean {
   if (!(binsUp > 1) || !(binStep > 0) || !(unwindBps > 0)) return false;
   const step = Math.max(binStep, 1) / 10_000;
-  return binsUp * step > unwindBps / 10_000;
+  const keep = Math.min(0.1, Math.max(0, feePct)) * 0.9;
+  return binsUp * step > unwindBps / 10_000 + keep;
+}
+
+/**
+ * Never sell inside the unwind. Past it, sell when the move also clears the
+ * fee, or when the chop that was supposed to come back has died.
+ */
+export function filledShouldSell(args: {
+  binsUp: number;
+  binStep: number;
+  unwindBps?: number;
+  feePct?: number;
+  chopAlive: boolean;
+}): boolean {
+  const unwind = args.unwindBps ?? 300;
+  const pastUnwind = filledSellClears(args.binsUp, args.binStep, unwind, 0);
+  if (!pastUnwind) return false;
+  if (filledSellClears(args.binsUp, args.binStep, unwind, args.feePct ?? 0)) return true;
+  return !args.chopAlive;
 }
 
 /** The price ran more than one bin above the entry, so this bid is no longer the next sell. */
