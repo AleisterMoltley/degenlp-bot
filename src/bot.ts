@@ -1,6 +1,6 @@
 import { buildCandidates, fetchOriginalOpportunityChecks, fetchTopPumpTokens } from "./apis.js";
 import { config } from "./config.js";
-import { bankableUsd } from "./edge.js";
+import { bankableUsd, collectedFeePct } from "./edge.js";
 import { chopFromPrices } from "./chop.js";
 import { bidCycle } from "./fillwatch.js";
 import { binTapeFromIds, feeRateClears, mintShouldSleep, priceBinId } from "./travel.js";
@@ -375,8 +375,8 @@ export class DegenLpBot {
           (pool.chopSamples ?? 0) >= 4 &&
           feeRateClears(pool.baseFeePct ?? 0, pool.binStep ?? 80, this.unwindBps()),
       )
-      .sort((a, b) => (b.baseFeePct ?? 0) - (a.baseFeePct ?? 0))
-      .slice(0, 4);
+      .sort((a, b) => collectedFeePct(b) - collectedFeePct(a) || (b.baseFeePct ?? 0) - (a.baseFeePct ?? 0))
+      .slice(0, 8);
     await Promise.all(
       ranked.map(async (pool) => {
         const hit = this.binSolCache.get(pool.poolAddress);
@@ -402,8 +402,8 @@ export class DegenLpBot {
     const unwindBps = this.unwindBps();
     const shortlist = pools
       .filter((pool) => pool.venue === "dlmm" && feeRateClears(pool.baseFeePct ?? 0, pool.binStep ?? 80, unwindBps))
-      .sort((a, b) => (b.baseFeePct ?? 0) - (a.baseFeePct ?? 0))
-      .slice(0, 8);
+      .sort((a, b) => collectedFeePct(b) - collectedFeePct(a) || (b.baseFeePct ?? 0) - (a.baseFeePct ?? 0))
+      .slice(0, 12);
     const ids = new Map<string, number>();
     if (this.executor) {
       try {

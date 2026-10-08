@@ -37,6 +37,7 @@ export interface QuoteOpts {
   fillFraction?: number;
   swapBps?: number;
   lockSide?: boolean;
+  fillFee?: boolean;
 }
 
 export function computeMetrics(
@@ -69,6 +70,10 @@ function computeFeeMetrics(
 
   const feeToTvlRatio = fee30m / Math.max(poolTvl, 1);
   const volumeToTvlRatio = volume30m / Math.max(poolTvl, 1);
+  const seatUsd = deploySol * (candidate.solPrice || 0);
+  // A one-bin fill only needs enough volume to trade the seat. The 30-minute
+  // dollar floor stays on every other quote.
+  const volumeOk = quote?.fillFee ? volume30m >= seatUsd : volume30m >= config.minVolume30mUsd;
   const minEdgeUsd = growth
     ? Math.max(config.minEdgeUsd, deploySol * (candidate.solPrice || 0) * 0.003)
     : config.minEdgeUsd;
@@ -79,6 +84,7 @@ function computeFeeMetrics(
     minEdgeUsd,
     deploySol,
     fillFraction: quote?.fillFraction,
+    fillFee: quote?.fillFee,
   };
   if (candidate.venue === "dlmm" && !quote?.lockSide) {
     candidate.side = chooseShape(candidate, edgeInput);
@@ -93,7 +99,7 @@ function computeFeeMetrics(
     ageOk &&
     holdersOk &&
     fee30m >= config.minFee30mUsd &&
-    volume30m >= config.minVolume30mUsd &&
+    volumeOk &&
     poolTvl >= config.minPairLiquidityUsd &&
     poolTvl <= config.maxPairLiquidityUsd &&
     feeToTvlRatio >= config.minFeeToTvl30m &&

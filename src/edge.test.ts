@@ -77,6 +77,47 @@ test("a cooling pool is haircut below the gate", () => {
   assert.equal(cooling.profitable, false);
 });
 
+test("a one-bin fill credits the collected fee and still pays the scratch", () => {
+  const hot = pool(2_000, {
+    baseFeePct: 0.05,
+    volume30mUsd: 40_000,
+    binStep: 100,
+    rangeHalfWidth: 0.01,
+  });
+  const skim = { ...input, deploySol: 0.16, fillFraction: 0.035, swapBps: 0 };
+  const drip = quoteEdge(hot, skim);
+  const fill = quoteEdge(hot, { ...skim, fillFee: true });
+  assert.equal(drip.profitable, false);
+  assert.equal(fill.profitable, true);
+  assert.ok(Math.abs(fill.ilBudgetUsd - 0.16 * 100 * 0.035) < 1e-9);
+  assert.ok(fill.expectedFeesUsd <= 0.05 * 16 + 1e-9);
+  assert.ok(fill.expectedFeesUsd > 0.04 * 16);
+});
+
+test("a sticker fee the pool did not collect stays red", () => {
+  const sticker = pool(40, { baseFeePct: 0.08, volume30mUsd: 40_000 });
+  const quote = quoteEdge(sticker, {
+    ...input,
+    deploySol: 0.16,
+    fillFraction: 0.035,
+    swapBps: 0,
+    fillFee: true,
+  });
+  assert.equal(quote.profitable, false);
+});
+
+test("a collected fee under the scratch stays red", () => {
+  const thin = pool(800, { baseFeePct: 0.02, volume30mUsd: 40_000 });
+  const quote = quoteEdge(thin, {
+    ...input,
+    deploySol: 0.16,
+    fillFraction: 0.035,
+    swapBps: 0,
+    fillFee: true,
+  });
+  assert.equal(quote.profitable, false);
+});
+
 test("bankable profit subtracts the unpaid exit", () => {
   assert.ok(bankableUsd(0.1, 0.01, 0.02, 0.02) > 0.04);
   assert.ok(bankableUsd(0, 0.2, 0.02, 0.02) < 0);

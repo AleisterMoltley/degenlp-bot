@@ -9,6 +9,11 @@ export interface EdgeInput {
   deploySol: number;
   /** Bid inventory charged up front. Defaults to a 4% fill. A skim passes a one-bin touch. */
   fillFraction?: number;
+  /**
+   * One-bin skim. Credit the fee on a single fill of the seat, and keep the
+   * full scratch budget. Never a second fee, and never a zero scratch.
+   */
+  fillFee?: boolean;
 }
 
 export interface EdgeQuote {
@@ -31,6 +36,16 @@ const FLAT: EdgeQuote = {
   profitable: false,
 };
 
+/**
+ * Fee rate a fill can actually collect. The lesser of the posted base fee and
+ * the fees the pool collected per dollar of volume. A sticker with no flow pays nothing.
+ */
+export function collectedFeePct(pool: { baseFeePct?: number; fee30mUsd: number; volume30mUsd: number }): number {
+  const posted = pool.baseFeePct ?? 0;
+  if (!(posted > 0) || !(pool.volume30mUsd > 0) || !(pool.fee30mUsd > 0)) return 0;
+  return Math.min(posted, pool.fee30mUsd / pool.volume30mUsd);
+}
+
 /** Expected dollars left after the round trip and a small adverse move. */
 export function quoteEdge(pool: PoolCandidate, input: EdgeInput): EdgeQuote {
   const deployUsd = input.deploySol * (pool.solPrice || 0);
@@ -52,7 +67,15 @@ export function quoteEdge(pool: PoolCandidate, input: EdgeInput): EdgeQuote {
   });
   // A tight bid does not sit in range for the whole hold. Scale fees by how
   // much room the band has versus a few minutes of memecoin noise.
-  const expectedFeesUsd = feePerMin * input.holdMin * share * timeInRange(pool, input.holdMin);
+  // A one-bin fill is different: the fee is the rate on the notional that
+  // trades into the bin, once. The scratch budget below is unchanged.
+  let expectedFeesUsd = feePerMin * input.holdMin * share * timeInRange(pool, input.holdMin);
+  if (input.fillFee && pool.side === "bid") {
+    let feePct = collectedFeePct(pool);
+    if (prior30 > 0 && pool.fee30mUsd < prior30 * 0.75) feePct *= 0.45;
+    const filled = Math.min(1, pool.volume30mUsd / deployUsd);
+    expectedFeesUsd = feePct * deployUsd * filled;
+  }
   const roundTripUsd =
     entryCostUsd({
       side: pool.side,

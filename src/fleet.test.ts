@@ -285,6 +285,89 @@ test("a one-bin snipe stays inside the seat cap", () => {
   assert.ok(sol <= 0.72 + 1e-9);
 });
 
+test("a collected 5% fee opens a one-bin bid the drip would refuse", () => {
+  const payer = pool({
+    poolAddress: "payer",
+    tokenMint: "payer",
+    tokenSymbol: "PAY",
+    poolName: "PAY-SOL",
+    baseFeePct: 0.05,
+    binStep: 100,
+    fee30mUsd: 400,
+    fee1hUsd: 800,
+    volume30mUsd: 8_000,
+  });
+  const plan = planFleet({ pools: [payer], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.equal(plan.opens.length, 1, plan.summary);
+  assert.equal(plan.opens[0]?.pool.poolAddress, "payer");
+  assert.ok(plan.opens[0].metrics.edgeUsd > 0);
+
+  const sticker = pool({
+    ...payer,
+    poolAddress: "sticker",
+    fee30mUsd: 400,
+    fee1hUsd: 800,
+    volume30mUsd: 80_000,
+  });
+  const dead = planFleet({ pools: [sticker], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.equal(dead.opens.length, 0, dead.summary);
+});
+
+test("a seat-sized print can open under the 30-minute volume floor", () => {
+  const small = pool({
+    poolAddress: "small",
+    tokenMint: "small",
+    tokenSymbol: "SMALL",
+    poolName: "SMALL-SOL",
+    baseFeePct: 0.05,
+    binStep: 100,
+    fee30mUsd: 40,
+    fee1hUsd: 80,
+    volume30mUsd: 800,
+    pairLiquidityUsd: 8_000,
+    tokenLiquidityUsd: 8_000,
+  });
+  const plan = planFleet({ pools: [small], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.equal(plan.opens.length, 1, plan.summary);
+
+  const dust = pool({
+    ...small,
+    poolAddress: "dust",
+    volume30mUsd: 10,
+  });
+  const no = planFleet({ pools: [dust], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.equal(no.opens.length, 0, no.summary);
+});
+
+test("a pool the fill quote accepts leads a hotter pool the geometry gate refuses", () => {
+  const loud = pool({
+    poolAddress: "loud",
+    tokenMint: "loud",
+    tokenSymbol: "LOUD",
+    poolName: "LOUD-SOL",
+    baseFeePct: 0.02,
+    fee30mUsd: 4_000,
+    fee1hUsd: 8_000,
+    pairLiquidityUsd: 20_000,
+    tokenLiquidityUsd: 20_000,
+  });
+  const payer = pool({
+    poolAddress: "payer-rank",
+    tokenMint: "payer-rank",
+    tokenSymbol: "PAY",
+    poolName: "PAY-SOL",
+    baseFeePct: 0.05,
+    binStep: 100,
+    fee30mUsd: 400,
+    fee1hUsd: 800,
+    volume30mUsd: 8_000,
+  });
+  const plan = planFleet({ pools: [loud, payer], seats: [], deploySol: 0.72, now, dlmmOnly: true });
+  assert.equal(plan.preview[0]?.poolAddress, "payer-rank");
+  assert.equal(plan.preview[0]?.metThreshold, true);
+  assert.equal(plan.opens[0]?.pool.poolAddress, "payer-rank");
+});
+
 test("a thin base fee does not open", () => {
   const thin = paying({
     baseFeePct: 0.02,

@@ -160,6 +160,7 @@ function skimQuote(
     fillFraction: skimFillFraction(pool.binStep, SNIPE_BINS, UNWIND_BPS, dropOf(pool, moves)),
     swapBps: 0,
     lockSide: true,
+    fillFee: true,
   });
   return { pool: copy, metrics };
 }
@@ -514,8 +515,10 @@ export function planFleet(args: {
     row.metThreshold = true;
     row.opportunityScore = open.metrics.opportunityScore;
   }
-  preview.sort((a, b) => b.feeToTvl - a.feeToTvl || b.fee30m - a.fee30m);
-  const watchedRows = preview.filter((row) => row.watched).sort((a, b) => b.feeToTvl - a.feeToTvl || b.fee30m - a.fee30m);
+  const quoteReady = (row: FleetPreview) =>
+    row.edgeUsd > 0 && row.strategy !== "geometry" && row.strategy !== "tape" ? 1 : 0;
+  preview.sort((a, b) => quoteReady(b) - quoteReady(a) || b.feeToTvl - a.feeToTvl || b.fee30m - a.fee30m);
+  const watchedRows = preview.filter((row) => row.watched).sort((a, b) => quoteReady(b) - quoteReady(a) || b.feeToTvl - a.feeToTvl || b.fee30m - a.fee30m);
   const rest = preview.filter((row) => !row.watched);
   const cap = Math.max(8, Math.min(24, watchedRows.length || 8));
   preview.splice(0, preview.length, ...[...watchedRows, ...rest].slice(0, cap));

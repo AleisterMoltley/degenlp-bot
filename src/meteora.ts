@@ -244,6 +244,8 @@ async function fetchApiPages(
   const queries = [1, 2].flatMap((page) =>
     ["fee_30m:desc", "fee_tvl_ratio_30m:desc"].map((sort) => ({ page, sort })),
   );
+  // One more fee/TVL page. Dense small pools sit behind the fee-dollar leaders.
+  queries.push({ page: 3, sort: "fee_tvl_ratio_30m:desc" });
   const pages = await Promise.allSettled(
     queries.map(async ({ page, sort }) => {
       const url =
