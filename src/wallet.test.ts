@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { bs58 } from "@coral-xyz/anchor/dist/cjs/utils/bytes";
 import { Keypair } from "@solana/web3.js";
-import { assertSwapQuote, depositFloorLamports, minOutLamports, outClearsDeposit, quoteFailure, sellSlices, UNWIND_ATTEMPTS } from "./jupiter.js";
+import { assertSwapQuote, depositFloorLamports, filledLpStays, minOutLamports, outClearsDeposit, quoteFailure, sellSlices, UNWIND_ATTEMPTS } from "./jupiter.js";
 import { capDeploySol, parseWalletSecret, saveWalletSecret } from "./wallet.js";
 
 test("a base58 secret and a json byte array resolve to the same public key", () => {
@@ -36,6 +36,17 @@ test("a swap under the converted SOL is refused", () => {
   assert.equal(outClearsDeposit(999_999_999n, 1_000_000_000n), false);
   assert.equal(outClearsDeposit(1n, 0n), true);
   assert.equal(outClearsDeposit(minOutLamports(1_000_000_000n, 300), 1_000_000_000n), false);
+});
+
+test("a filled bag stays in the bin when the unwind misses the converted SOL", () => {
+  const floor = 500_000_000n;
+  const bag = 1_000_000n;
+  assert.equal(filledLpStays(bag, 400_000_000n, floor), true);
+  assert.equal(filledLpStays(bag, null, floor), true);
+  assert.equal(filledLpStays(bag, floor, floor), false);
+  assert.equal(filledLpStays(bag, minOutLamports(floor, 300), floor), true);
+  assert.equal(filledLpStays(1_000n, 1n, floor), false);
+  assert.equal(filledLpStays(bag, 1n, 0n), false);
 });
 
 test("an unwind stops at 8% impact", () => {

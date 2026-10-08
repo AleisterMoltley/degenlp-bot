@@ -40,6 +40,25 @@ export function outClearsDeposit(minOut: bigint, deployedLamports: bigint): bool
   return minOut >= deployedLamports;
 }
 
+/**
+ * A filled withdraw whose unwind is under the converted SOL pulls the meme
+ * into the wallet, where the next buy pays someone else. Stay in the bin when
+ * the bag is real and the best worst-case is missing or short of that SOL.
+ * Dust is SOL again, and an unfilled bid has no floor. Clearing the floor is
+ * not a profit: the transactions are still paid.
+ */
+export function filledLpStays(
+  memeRaw: bigint,
+  worstOut: bigint | null,
+  floorLamports: bigint,
+  dustRaw = 10_000n,
+): boolean {
+  if (floorLamports <= 0n) return false;
+  if (memeRaw <= dustRaw) return false;
+  if (worstOut == null) return true;
+  return !outClearsDeposit(worstOut, floorLamports);
+}
+
 const JUPITER = "https://lite-api.jup.ag/swap/v1";
 
 export interface SwapQuote {
@@ -84,6 +103,29 @@ export function quoteFailure(status: number, body: string): string {
     /* The body was not JSON. Keep the raw snippet. */
   }
   return `swap quote was rejected ${status}${detail ? ` ${detail}` : ""}`;
+}
+
+/** Ideal SOL out for a meme bag. Does not build a swap. */
+export async function quoteJupiterOut(args: {
+  inputMint: string;
+  outputMint: string;
+  amount: bigint;
+  slippageBps: number;
+  maxImpact: number;
+}): Promise<bigint> {
+  if (args.amount <= 0n) throw new Error("swap quote was empty");
+  const quoteUrl = new URL(`${JUPITER}/quote`);
+  quoteUrl.searchParams.set("inputMint", args.inputMint);
+  quoteUrl.searchParams.set("outputMint", args.outputMint);
+  quoteUrl.searchParams.set("amount", args.amount.toString());
+  quoteUrl.searchParams.set("slippageBps", String(args.slippageBps));
+  const quoteRes = await fetch(quoteUrl, { signal: AbortSignal.timeout(8_000) });
+  if (!quoteRes.ok) throw new Error(quoteFailure(quoteRes.status, await quoteRes.text()));
+  const quote = (await quoteRes.json()) as SwapQuote;
+  assertSwapQuote(quote, args.maxImpact);
+  const out = BigInt(quote.outAmount || "0");
+  if (out <= 0n) throw new Error("swap quote was empty");
+  return out;
 }
 
 export async function buildJupiterSwap(args: {

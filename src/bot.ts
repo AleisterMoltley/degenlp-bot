@@ -106,6 +106,8 @@ export class DegenLpBot {
   private cooloff = new Map<string, number>();
   /** Converted SOL that a later sweep must still return before it sells the meme. */
   private solFloor = new Map<string, bigint>();
+  /** A filled close whose quote missed the floor. The seat stays in the bin. */
+  private floorHold = new Map<string, number>();
   private deploySol = config.solDeploy;
   private walletPublicKey: string | null = null;
   private kick = false;
@@ -712,6 +714,7 @@ export class DegenLpBot {
     action: BotDecision,
     alreadyFlat = false,
   ): Promise<void> {
+    if ((this.floorHold.get(active.id) ?? 0) > Date.now()) return Promise.resolve();
     const existing = this.exitFlight.get(active.id);
     if (existing) return existing;
     const flight = this.finishClose(active, reason, action, alreadyFlat).finally(() => {
@@ -728,17 +731,25 @@ export class DegenLpBot {
     action: BotDecision,
     alreadyFlat = false,
   ) {
-    // Sleep only after a run-through or a violent exit. A dust atom still inside the bin can be checked again.
-    if (mintShouldSleep(reason, this.lastActiveId.get(active.poolAddress), active.minBinId)) {
-      this.mintSleep.set(active.tokenMint, Date.now() + 3 * 60_000);
-    }
     let sig = "dry_run_exit";
     if (!config.dryRun && this.executor) {
       if (alreadyFlat) {
         sig = "slide_removed";
       } else {
         const exists = await this.executor.positionExists(active.positionAddress);
-        sig = await this.executor.exit(active, exists ? reason : "Position not found on-chain - already closed");
+        if (!exists) {
+          sig = await this.executor.exit(active, "Position not found on-chain - already closed");
+        } else {
+          const floor = depositFloorLamports(active.solDeployed, active.filled === true, active.fillFraction);
+          // The market sell is the stop only when it still returns the converted
+          // SOL. Under that, the meme stays where the next buy pays the fee.
+          if (floor > 0n && !(await this.executor.unwindClearsFloor(active, floor))) {
+            this.floorHold.set(active.id, Date.now() + 30_000);
+            console.log(`[hold] ${active.poolName} unwind is under the SOL deposited; the fill stays in the bin`);
+            return;
+          }
+          sig = await this.executor.exit(active, reason);
+        }
       }
       const floor = depositFloorLamports(active.solDeployed, active.filled === true, active.fillFraction);
       if (floor > 0n) this.solFloor.set(active.tokenMint, floor);
@@ -754,6 +765,11 @@ export class DegenLpBot {
     }
     active.costsUsd += config.txCostUsd;
 
+    // Sleep only after a run-through or a violent exit. A quote under the floor never got here.
+    if (mintShouldSleep(reason, this.lastActiveId.get(active.poolAddress), active.minBinId)) {
+      this.mintSleep.set(active.tokenMint, Date.now() + 3 * 60_000);
+    }
+    this.floorHold.delete(active.id);
     if (coolsOff(reason)) {
       this.cooloff.set(active.poolAddress, Date.now() + 15 * 60_000);
     }

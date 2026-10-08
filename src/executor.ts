@@ -11,7 +11,7 @@ import {
 import BN from "bn.js";
 import { config } from "./config.js";
 import { activeIdFromPool, activeIdsFromAccounts, MAX_SOL_HOP_BINS } from "./fillwatch.js";
-import { buildJupiterSwap, minOutLamports, outClearsDeposit, sellSlices, SOL_MINT, UNWIND_ATTEMPTS } from "./jupiter.js";
+import { buildJupiterSwap, filledLpStays, minOutLamports, outClearsDeposit, quoteJupiterOut, sellSlices, SOL_MINT, UNWIND_ATTEMPTS } from "./jupiter.js";
 import { buildPosition } from "./position.js";
 import type { ActivePosition, OpportunityCheck, PoolCandidate } from "./types.js";
 
@@ -446,6 +446,64 @@ export class DlmmExecutor {
       const reason = err instanceof Error ? err.message : "redeposit failed";
       return { ok: false, flat: true, reason };
     }
+  }
+
+  /**
+   * True when a withdraw can still be sold back to the converted SOL.
+   * A real meme bag with no such quote stays in the bin. Dust is SOL again.
+   * A position read that fails stays too: withdrawing blind is how a fill
+   * becomes a wallet bag that earns no fee.
+   */
+  async unwindClearsFloor(position: ActivePosition, floorLamports: bigint): Promise<boolean> {
+    if (floorLamports <= 0n) return true;
+    let meme: bigint;
+    try {
+      meme = await this.positionMemeRaw(position.poolAddress, position.positionAddress, position.tokenMint);
+    } catch {
+      console.error("[hold] position read failed");
+      return false;
+    }
+    if (meme <= DUST_RAW) return true;
+    let best: bigint | null = null;
+    const consider = (worst: bigint) => {
+      if (best == null || worst > best) best = worst;
+    };
+    for (const attempt of UNWIND_ATTEMPTS) {
+      try {
+        const out = await quoteJupiterOut({
+          inputMint: position.tokenMint,
+          outputMint: SOL_MINT,
+          amount: meme,
+          slippageBps: attempt.slippageBps,
+          maxImpact: attempt.maxImpact,
+        });
+        consider(minOutLamports(out, attempt.slippageBps));
+      } catch {
+        /* This attempt has no route that clears its own impact cap. */
+      }
+    }
+    try {
+      consider(await this.dlmmMinOut(position.poolAddress, position.tokenMint, meme));
+    } catch {
+      /* The pool quote can fail while the position is still earning. */
+    }
+    return !filledLpStays(meme, best, floorLamports, DUST_RAW);
+  }
+
+  /** Worst SOL a taker swap of this bag would lock on the pool. */
+  private async dlmmMinOut(poolAddress: string, mint: string, amount: bigint): Promise<bigint> {
+    const dlmm = await DLMM.create(this.connection, new PublicKey(poolAddress));
+    const memeIsX = dlmm.tokenX.publicKey.toBase58() === mint;
+    const other = memeIsX ? dlmm.tokenY.publicKey.toBase58() : dlmm.tokenX.publicKey.toBase58();
+    if (!memeIsX && dlmm.tokenY.publicKey.toBase58() !== mint) throw new Error("pool does not hold this mint");
+    if (other !== SOL_MINT) throw new Error("pool has no SOL side");
+    const swapForY = memeIsX;
+    const bins = await dlmm.getBinArrayForSwap(swapForY, 4);
+    const unwindBps = UNWIND_ATTEMPTS[UNWIND_ATTEMPTS.length - 1].slippageBps;
+    const quote = dlmm.swapQuote(new BN(amount.toString()), swapForY, new BN(unwindBps), bins, true);
+    const minOut = quote.minOutAmount?.gtn(0) ? quote.minOutAmount : null;
+    if (!minOut) throw new Error("dlmm quote was empty");
+    return BigInt(minOut.toString());
   }
 
   async exit(position: ActivePosition, reason: string): Promise<string> {
